@@ -1,0 +1,9 @@
+version: '3'
+
+services:
+  velux-mqtt-gw:
+    container_name: velux-mqtt-gw
+    image: pharndt/velux-mqtt-gw:${ENV:-latest}
+    volumes:
+      - ./config.json:/var/lib/velux-mqtt-gw/config.json:ro
+    restart: unless-stopped

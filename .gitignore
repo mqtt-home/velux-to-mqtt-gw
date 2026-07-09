@@ -1,0 +1,21 @@
+# Binaries
+/app/velux-mqtt-gw
+*.exe
+*.test
+*.out
+
+# goreleaser / build output
+/app/dist/
+/dist/
+
+# Local runtime config (may contain secrets) — commit config-example.json only
+config.json
+*.local.json
+.env
+
+# Go workspace
+go.work
+go.work.sum
+
+# OS / editor
+.DS_Store

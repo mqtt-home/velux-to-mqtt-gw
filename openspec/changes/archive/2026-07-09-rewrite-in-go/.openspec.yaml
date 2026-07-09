@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-07-09
+goal: Reimplement the Python vlxmqttha KLF200->MQTT bridge as a Go project
+  mirroring miele-to-mqtt-gw, including a full Go port of pyvlx
