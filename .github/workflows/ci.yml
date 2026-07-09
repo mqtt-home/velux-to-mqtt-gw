@@ -29,8 +29,9 @@ jobs:
         working-directory: app
         run: go build ./...
 
+      # Run golangci-lint via `go run` so it compiles with the workflow's Go 1.26
+      # toolchain. The prebuilt golangci-lint-action binaries are built with an
+      # older Go and refuse a `go 1.26` module ("linter built with older Go").
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
-          working-directory: app
+        working-directory: app
+        run: go run github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8 run ./...

@@ -2,11 +2,8 @@ package bridge
 
 import (
 	"encoding/json"
-	"fmt"
-	"sync"
 
 	"github.com/mqtt-home/velux-mqtt-gw/klf200"
-	logger "github.com/philipparndt/go-logger"
 )
 
 // discoveryAvailability is one entry in the HA `availability` array.
@@ -55,60 +52,10 @@ type switchDiscoveryPayload struct {
 	Device       discoveryDevice         `json:"device"`
 }
 
-// DiscoveryManager tracks published discovery topics and can clear them on
-// shutdown. It is safe for concurrent use.
-type DiscoveryManager struct {
-	mu     sync.Mutex
-	topics []string
-	mqtt   *MQTT
-}
-
-// NewDiscoveryManager creates a DiscoveryManager backed by the given MQTT
-// wrapper. The caller is responsible for publishing via PublishDiscovery or
-// Cover.PublishDiscovery and then using CleanupDiscovery on shutdown.
-func NewDiscoveryManager(m *MQTT) *DiscoveryManager {
-	return &DiscoveryManager{mqtt: m}
-}
-
-// publishDiscovery publishes a retained discovery payload for cover c and
-// records the topics so CleanupDiscovery can clear them later.
-func (dm *DiscoveryManager) publishDiscovery(c *Cover) error {
-	coverTopic, coverJSON, err := buildCoverDiscovery(c)
-	if err != nil {
-		return fmt.Errorf("build cover discovery for %s: %w", c.id, err)
-	}
-
-	switchTopic, switchJSON, err := buildSwitchDiscovery(c)
-	if err != nil {
-		return fmt.Errorf("build switch discovery for %s: %w", c.id, err)
-	}
-
-	c.mqtt.Publish(coverTopic, string(coverJSON), true)
-	c.mqtt.Publish(switchTopic, string(switchJSON), true)
-
-	logger.Debug("[discovery] published", "cover", coverTopic, "switch", switchTopic)
-
-	dm.mu.Lock()
-	dm.topics = append(dm.topics, coverTopic, switchTopic)
-	dm.mu.Unlock()
-
-	return nil
-}
-
-// CleanupDiscovery clears every published discovery topic by sending an empty
-// retained payload. Home Assistant treats an empty retained discovery message
-// as a removal of the entity / device.
-func (dm *DiscoveryManager) CleanupDiscovery() {
-	dm.mu.Lock()
-	topics := make([]string, len(dm.topics))
-	copy(topics, dm.topics)
-	dm.mu.Unlock()
-
-	for _, topic := range topics {
-		dm.mqtt.Publish(topic, "", true)
-		logger.Debug("[discovery] cleared", "topic", topic)
-	}
-}
+// NOTE: discovery publishing + cleanup for production lives on the cover/manager
+// path — Cover.PublishDiscovery (cover.go) records topics via recordDiscoveryTopic
+// and Manager.CloseAll clears them via the package-level CleanupDiscovery
+// (manager.go). The builders below assemble the payloads.
 
 // buildCoverDiscovery assembles the homeassistant/cover/.../config topic and
 // JSON payload for the given cover.
