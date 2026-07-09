@@ -94,7 +94,7 @@ func (n *LighteningDevice) Intensity() protocol.Intensity { return n.intensity }
 // main-parameter value, mirroring pyvlx's node.intensity = intensity
 // assignment. It does not fire AfterUpdate; the updater does that afterwards.
 func (n *LighteningDevice) SetIntensityState(intensity protocol.Position) {
-	n.intensity = protocol.Intensity{Parameter: intensity.Parameter}
+	n.intensity = protocol.Intensity(intensity)
 }
 
 var _ Node = (*LighteningDevice)(nil)

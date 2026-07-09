@@ -188,7 +188,7 @@ func (ss *Scenes) Load(ctx context.Context) error {
 	req := &protocol.FrameGetSceneListRequest{}
 
 	var (
-		expectedCount int = -1 // -1 means CFM not yet received
+		expectedCount = -1 // -1 means CFM not yet received
 		collected     []protocol.SceneEntry
 	)
 

@@ -39,7 +39,7 @@ import (
 func LoadAllNodes(ctx context.Context, c *Client) ([]*protocol.FrameGetAllNodesInformationNotification, error) {
 	req := &protocol.FrameGetAllNodesInformationRequest{}
 
-	var numberOfNodes int = -1 // -1 = confirmation not yet received
+	numberOfNodes := -1 // -1 = confirmation not yet received
 	var collected []*protocol.FrameGetAllNodesInformationNotification
 
 	err := c.APICall(ctx, req, func(frame protocol.Frame) bool {

@@ -19,7 +19,7 @@ func TestReplaceEnvVariables_Set(t *testing.T) {
 }
 
 func TestReplaceEnvVariables_Unset(t *testing.T) {
-	os.Unsetenv("VELUX_NOPE")
+	_ = os.Unsetenv("VELUX_NOPE")
 	got := string(ReplaceEnvVariables([]byte(`{"x":"${VELUX_NOPE}"}`)))
 	want := `{"x":""}`
 	if got != want {
@@ -217,7 +217,7 @@ func TestLoadConfig_EnvSubstitution_Set(t *testing.T) {
 }
 
 func TestLoadConfig_EnvSubstitution_Unset(t *testing.T) {
-	os.Unsetenv("VELUX_MISSING")
+	_ = os.Unsetenv("VELUX_MISSING")
 
 	// Unset var becomes empty, triggering required-field validation for velux.password.
 	body := `{
