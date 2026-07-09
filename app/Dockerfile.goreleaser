@@ -1,0 +1,14 @@
+# syntax=docker/dockerfile:1.24
+
+# Final stage - only for the binary
+FROM gcr.io/distroless/static:nonroot
+
+WORKDIR /
+
+# Copy the pre-built binary from GoReleaser
+COPY velux-mqtt-gw /velux-mqtt-gw
+
+# Use non-root user (distroless already provides this)
+USER nonroot:nonroot
+
+ENTRYPOINT ["/velux-mqtt-gw", "/var/lib/velux-mqtt-gw/config.json"]

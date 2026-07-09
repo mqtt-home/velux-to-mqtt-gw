@@ -1,0 +1,7 @@
+FROM scratch
+
+COPY velux-mqtt-gw /velux-mqtt-gw
+
+USER 65534:65534
+
+ENTRYPOINT ["/velux-mqtt-gw", "/var/lib/velux-mqtt-gw/config.json"]

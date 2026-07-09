@@ -1,0 +1,25 @@
+{
+  "mqtt": {
+    "url": "tcp://192.168.1.10:1883",
+    "username": "mqttuser",
+    "password": "mqttpassword",
+    "client-id": "velux-mqtt-gw",
+    "retain": true,
+    "qos": 1,
+    "topic": "velux"
+  },
+  "velux": {
+    "host": "192.168.1.50",
+    "password": "velux123"
+  },
+  "homeassistant": {
+    "prefix": "",
+    "invert-awning": false
+  },
+  "restart": {
+    "restart-interval": 24,
+    "health-check-interval": 300,
+    "restart-on-error": true
+  },
+  "loglevel": "info"
+}
