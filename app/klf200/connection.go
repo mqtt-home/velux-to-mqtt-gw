@@ -7,7 +7,9 @@ package klf200
 
 import (
 	"context"
+	"crypto/sha1" //nolint:gosec // used only as a certificate fingerprint, not a signature.
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -19,6 +21,36 @@ import (
 // DefaultPort is the TCP port the KLF200 API listens on. Ported from
 // config.Config.DEFAULT_PORT.
 const DefaultPort = 51200
+
+// veluxCertFingerprintSHA1 is the SHA-1 fingerprint of the shared, self-signed
+// VELUX certificate that every KLF-200 gateway presents on its TLS listener.
+// The certificate itself was issued 2018-04-25 with an 8-year lifetime and
+// expired 2026-07-12 09:38:26 GMT — so a normal chain/expiry check now rejects
+// every device in the field. We deliberately bypass Go's built-in verification
+// (InsecureSkipVerify) and instead pin this fingerprint via VerifyPeerCertificate,
+// which mirrors the fix in the upstream JS lib (MiSchroe/klf-200-api PR #255):
+// only the known VELUX certificate is accepted, its expiry is intentionally
+// ignored, and any other cert (including a MITM attempt with a different
+// self-signed cert) is rejected.
+var veluxCertFingerprintSHA1 = [20]byte{
+	0x02, 0x8C, 0x23, 0xA0, 0x89, 0x2B, 0x62, 0x98,
+	0xC4, 0x99, 0x00, 0x5B, 0xD2, 0xE7, 0x2E, 0x0A,
+	0x70, 0x3D, 0x71, 0x6A,
+}
+
+// verifyPinnedFingerprint accepts the peer's leaf certificate iff its SHA-1
+// fingerprint equals pinned. Certificate expiry is intentionally not checked —
+// see veluxCertFingerprintSHA1 for the story.
+func verifyPinnedFingerprint(rawCerts [][]byte, pinned [20]byte) error {
+	if len(rawCerts) == 0 {
+		return errors.New("klf200: peer presented no certificate")
+	}
+	got := sha1.Sum(rawCerts[0]) //nolint:gosec // fingerprint, not signature.
+	if got != pinned {
+		return fmt.Errorf("klf200: peer certificate SHA-1 fingerprint %x does not match pinned VELUX fingerprint %x", got, pinned)
+	}
+	return nil
+}
 
 // FrameReceivedCallback is invoked for every decoded, non-nil frame read from
 // the gateway. It corresponds to the callables registered with pyvlx's
@@ -91,11 +123,13 @@ func NewConn(host string, port int) *Conn {
 }
 
 // Connect establishes the TLS connection and starts the read loop. The KLF200
-// presents a self-signed certificate, so verification is disabled
-// (InsecureSkipVerify), matching pyvlx's create_ssl_context (CERT_NONE,
-// check_hostname False). The provided context bounds the dial/handshake only;
-// once connected the read loop runs until the connection is lost or Disconnect
-// is called.
+// presents a shared, self-signed VELUX certificate whose fingerprint we pin
+// (see veluxCertFingerprintSHA1). InsecureSkipVerify disables Go's default
+// chain/expiry check — needed both because the cert is self-signed and because
+// it expired 2026-07-12 — and VerifyPeerCertificate then enforces the pin, so
+// only the known VELUX certificate is ever accepted. The provided context
+// bounds the dial/handshake only; once connected the read loop runs until the
+// connection is lost or Disconnect is called.
 func (c *Conn) Connect(ctx context.Context) error {
 	c.mu.Lock()
 	if c.connected {
@@ -107,7 +141,10 @@ func (c *Conn) Connect(ctx context.Context) error {
 	addr := net.JoinHostPort(c.host, fmt.Sprintf("%d", c.port))
 	dialer := &tls.Dialer{
 		Config: &tls.Config{
-			InsecureSkipVerify: true, // KLF200 uses a self-signed certificate.
+			InsecureSkipVerify: true, //nolint:gosec // pinned via VerifyPeerCertificate below.
+			VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+				return verifyPinnedFingerprint(rawCerts, veluxCertFingerprintSHA1)
+			},
 			// The KLF200's TLS stack does not support TLS 1.3 and freezes on a
 			// TLS 1.3 ClientHello instead of negotiating down (confirmed against
 			// hardware: openssl -tls1_3 gets alert 40, Go's default 1.3 offer
