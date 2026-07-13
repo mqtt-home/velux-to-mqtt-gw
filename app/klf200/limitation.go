@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/mqtt-home/velux-mqtt-gw/klf200/protocol"
+	"github.com/mqtt-home/velux-to-mqtt-gw/klf200/protocol"
 )
 
 // This file ports pyvlx's api/get_limitation.py and api/set_limitation.py to the

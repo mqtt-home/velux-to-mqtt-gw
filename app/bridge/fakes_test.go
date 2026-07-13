@@ -3,8 +3,8 @@ package bridge
 import (
 	"context"
 
-	"github.com/mqtt-home/velux-mqtt-gw/klf200"
-	"github.com/mqtt-home/velux-mqtt-gw/klf200/protocol"
+	"github.com/mqtt-home/velux-to-mqtt-gw/klf200"
+	"github.com/mqtt-home/velux-to-mqtt-gw/klf200/protocol"
 	gwconfig "github.com/philipparndt/mqtt-gateway/config"
 	"github.com/philipparndt/mqtt-gateway/mqtt"
 )

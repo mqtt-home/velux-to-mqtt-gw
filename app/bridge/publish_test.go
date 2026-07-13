@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/mqtt-home/velux-mqtt-gw/klf200/protocol"
+	"github.com/mqtt-home/velux-to-mqtt-gw/klf200/protocol"
 )
 
 // TestUpdateNodePublishesState checks that UpdateNode publishes the derived

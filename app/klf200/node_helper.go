@@ -1,7 +1,7 @@
 package klf200
 
 import (
-	"github.com/mqtt-home/velux-mqtt-gw/klf200/protocol"
+	"github.com/mqtt-home/velux-to-mqtt-gw/klf200/protocol"
 )
 
 // NodeInfo is the type-specific node information handed to a NodeConstructor. It

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mqtt-home/velux-mqtt-gw/config"
+	"github.com/mqtt-home/velux-to-mqtt-gw/config"
 )
 
 // fakeKLF is a test double for the klfClient seam. It records the ordered

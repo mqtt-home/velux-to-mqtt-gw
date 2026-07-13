@@ -25,7 +25,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/mqtt-home/velux-mqtt-gw/klf200/protocol"
+	"github.com/mqtt-home/velux-to-mqtt-gw/klf200/protocol"
 )
 
 // LoadAllNodes issues GW_GET_ALL_NODES_INFORMATION_REQ, accumulates the

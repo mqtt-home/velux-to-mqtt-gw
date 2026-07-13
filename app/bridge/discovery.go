@@ -3,7 +3,7 @@ package bridge
 import (
 	"encoding/json"
 
-	"github.com/mqtt-home/velux-mqtt-gw/klf200"
+	"github.com/mqtt-home/velux-to-mqtt-gw/klf200"
 )
 
 // discoveryAvailability is one entry in the HA `availability` array.

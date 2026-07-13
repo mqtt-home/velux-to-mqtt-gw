@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/mqtt-home/velux-mqtt-gw/klf200"
+	"github.com/mqtt-home/velux-to-mqtt-gw/klf200"
 )
 
 // TestDeviceClassFor maps each concrete klf200 opening-device type to its HA

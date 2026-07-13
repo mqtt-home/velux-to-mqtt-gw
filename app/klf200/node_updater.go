@@ -1,7 +1,7 @@
 package klf200
 
 import (
-	"github.com/mqtt-home/velux-mqtt-gw/klf200/protocol"
+	"github.com/mqtt-home/velux-to-mqtt-gw/klf200/protocol"
 )
 
 // BlindNode is the interface implemented by Blind nodes. The node_updater uses

@@ -1,4 +1,4 @@
-module github.com/mqtt-home/velux-mqtt-gw
+module github.com/mqtt-home/velux-to-mqtt-gw
 
 go 1.26
 

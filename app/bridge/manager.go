@@ -4,8 +4,8 @@ import (
 	"context"
 	"sync"
 
-	"github.com/mqtt-home/velux-mqtt-gw/config"
-	"github.com/mqtt-home/velux-mqtt-gw/klf200"
+	"github.com/mqtt-home/velux-to-mqtt-gw/config"
+	"github.com/mqtt-home/velux-to-mqtt-gw/klf200"
 	"github.com/philipparndt/go-logger"
 )
 

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/mqtt-home/velux-mqtt-gw/klf200/protocol"
+	"github.com/mqtt-home/velux-to-mqtt-gw/klf200/protocol"
 )
 
 // HouseStatusMonitorEnable sends GW_HOUSE_STATUS_MONITOR_ENABLE_REQ and waits

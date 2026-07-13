@@ -3,7 +3,7 @@ package klf200
 import (
 	"testing"
 
-	"github.com/mqtt-home/velux-mqtt-gw/klf200/protocol"
+	"github.com/mqtt-home/velux-to-mqtt-gw/klf200/protocol"
 )
 
 // TestNodeFromInfo_ConcreteTypes verifies that node_helper builds the correct

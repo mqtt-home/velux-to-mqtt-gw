@@ -1,5 +1,5 @@
 # Binaries
-/app/velux-mqtt-gw
+/app/velux-to-mqtt-gw
 *.exe
 *.test
 *.out

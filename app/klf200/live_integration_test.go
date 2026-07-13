@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mqtt-home/velux-mqtt-gw/klf200"
-	"github.com/mqtt-home/velux-mqtt-gw/klf200/protocol"
+	"github.com/mqtt-home/velux-to-mqtt-gw/klf200"
+	"github.com/mqtt-home/velux-to-mqtt-gw/klf200/protocol"
 )
 
 // mover is satisfied by the roller-shutter node type: read position + command it.

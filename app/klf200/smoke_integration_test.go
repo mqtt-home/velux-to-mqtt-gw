@@ -21,8 +21,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mqtt-home/velux-mqtt-gw/klf200"
-	"github.com/mqtt-home/velux-mqtt-gw/klf200/protocol"
+	"github.com/mqtt-home/velux-to-mqtt-gw/klf200"
+	"github.com/mqtt-home/velux-to-mqtt-gw/klf200/protocol"
 )
 
 // positioner is satisfied by the opening-device node types; used only to print

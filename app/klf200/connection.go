@@ -13,7 +13,7 @@ import (
 	"net"
 	"sync"
 
-	"github.com/mqtt-home/velux-mqtt-gw/klf200/protocol"
+	"github.com/mqtt-home/velux-to-mqtt-gw/klf200/protocol"
 )
 
 // DefaultPort is the TCP port the KLF200 API listens on. Ported from

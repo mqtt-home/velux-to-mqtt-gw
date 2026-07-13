@@ -1,7 +1,7 @@
 FROM scratch
 
-COPY velux-mqtt-gw /velux-mqtt-gw
+COPY velux-to-mqtt-gw /velux-to-mqtt-gw
 
 USER 65534:65534
 
-ENTRYPOINT ["/velux-mqtt-gw", "/var/lib/velux-mqtt-gw/config.json"]
+ENTRYPOINT ["/velux-to-mqtt-gw", "/var/lib/velux-to-mqtt-gw/config.json"]

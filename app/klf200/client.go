@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mqtt-home/velux-mqtt-gw/klf200/protocol"
+	"github.com/mqtt-home/velux-to-mqtt-gw/klf200/protocol"
 )
 
 // Client is the high-level facade for a KLF200 gateway. It merges pyvlx's PyVLX

@@ -53,7 +53,7 @@ type RestartConfig struct {
 	RestartOnError      bool `json:"restart-on-error"`
 }
 
-// Config is the top-level configuration for the velux-mqtt-gw bridge.
+// Config is the top-level configuration for the velux-to-mqtt-gw bridge.
 type Config struct {
 	MQTT          MQTTConfig          `json:"mqtt"`
 	Velux         VeluxConfig         `json:"velux"`

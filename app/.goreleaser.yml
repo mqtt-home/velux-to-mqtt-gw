@@ -1,4 +1,4 @@
-project_name: velux-mqtt-gw
+project_name: velux-to-mqtt-gw
 version: 2
 
 before:
@@ -6,9 +6,9 @@ before:
     - go mod tidy
 
 builds:
-  - id: velux-mqtt-gw
+  - id: velux-to-mqtt-gw
     main: .
-    binary: velux-mqtt-gw
+    binary: velux-to-mqtt-gw
     goos:
       - linux
     goarch:
@@ -21,11 +21,11 @@ builds:
     env:
       - CGO_ENABLED=0
     ldflags:
-      - -s -w -X github.com/mqtt-home/velux-mqtt-gw/version.Version={{.Version}} -X github.com/mqtt-home/velux-mqtt-gw/version.GitCommit={{.Commit}} -X github.com/mqtt-home/velux-mqtt-gw/version.BuildTime={{.Date}}
+      - -s -w -X github.com/mqtt-home/velux-to-mqtt-gw/version.Version={{.Version}} -X github.com/mqtt-home/velux-to-mqtt-gw/version.GitCommit={{.Commit}} -X github.com/mqtt-home/velux-to-mqtt-gw/version.BuildTime={{.Date}}
 
 dockers:
   - image_templates:
-      - "mqtt-home/velux-mqtt-gw:{{ .Tag }}-amd64"
+      - "mqtt-home/velux-to-mqtt-gw:{{ .Tag }}-amd64"
     dockerfile: Dockerfile.goreleaser
     use: buildx
     goos: linux
@@ -35,7 +35,7 @@ dockers:
     skip_push: false
 
   - image_templates:
-      - "mqtt-home/velux-mqtt-gw:{{ .Tag }}-arm64"
+      - "mqtt-home/velux-to-mqtt-gw:{{ .Tag }}-arm64"
     dockerfile: Dockerfile.goreleaser
     use: buildx
     goos: linux
@@ -45,7 +45,7 @@ dockers:
     skip_push: false
 
   - image_templates:
-      - "mqtt-home/velux-mqtt-gw:{{ .Tag }}-armv6"
+      - "mqtt-home/velux-to-mqtt-gw:{{ .Tag }}-armv6"
     dockerfile: Dockerfile.goreleaser-arm
     use: buildx
     goos: linux
@@ -56,7 +56,7 @@ dockers:
     skip_push: false
 
   - image_templates:
-      - "mqtt-home/velux-mqtt-gw:{{ .Tag }}-armv7"
+      - "mqtt-home/velux-to-mqtt-gw:{{ .Tag }}-armv7"
     dockerfile: Dockerfile.goreleaser-arm
     use: buildx
     goos: linux
@@ -68,20 +68,20 @@ dockers:
 
 docker_manifests:
   - id: tag
-    name_template: "mqtt-home/velux-mqtt-gw:{{ .Tag }}"
+    name_template: "mqtt-home/velux-to-mqtt-gw:{{ .Tag }}"
     image_templates:
-      - mqtt-home/velux-mqtt-gw:{{ .Tag }}-amd64
-      - mqtt-home/velux-mqtt-gw:{{ .Tag }}-arm64
-      - mqtt-home/velux-mqtt-gw:{{ .Tag }}-armv6
-      - mqtt-home/velux-mqtt-gw:{{ .Tag }}-armv7
+      - mqtt-home/velux-to-mqtt-gw:{{ .Tag }}-amd64
+      - mqtt-home/velux-to-mqtt-gw:{{ .Tag }}-arm64
+      - mqtt-home/velux-to-mqtt-gw:{{ .Tag }}-armv6
+      - mqtt-home/velux-to-mqtt-gw:{{ .Tag }}-armv7
 
   - id: latest
-    name_template: "mqtt-home/velux-mqtt-gw:latest"
+    name_template: "mqtt-home/velux-to-mqtt-gw:latest"
     image_templates:
-      - mqtt-home/velux-mqtt-gw:{{ .Tag }}-amd64
-      - mqtt-home/velux-mqtt-gw:{{ .Tag }}-arm64
-      - mqtt-home/velux-mqtt-gw:{{ .Tag }}-armv6
-      - mqtt-home/velux-mqtt-gw:{{ .Tag }}-armv7
+      - mqtt-home/velux-to-mqtt-gw:{{ .Tag }}-amd64
+      - mqtt-home/velux-to-mqtt-gw:{{ .Tag }}-arm64
+      - mqtt-home/velux-to-mqtt-gw:{{ .Tag }}-armv6
+      - mqtt-home/velux-to-mqtt-gw:{{ .Tag }}-armv7
 
 release:
   disable: false

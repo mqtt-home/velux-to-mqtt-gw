@@ -15,14 +15,14 @@ ARG VERSION=dev
 ARG GIT_COMMIT=unknown
 ARG BUILD_TIME=unknown
 RUN CGO_ENABLED=0 GOOS=linux go build \
-    -ldflags "-s -w -X 'github.com/mqtt-home/velux-mqtt-gw/version.Version=${VERSION}' -X 'github.com/mqtt-home/velux-mqtt-gw/version.GitCommit=${GIT_COMMIT}' -X 'github.com/mqtt-home/velux-mqtt-gw/version.BuildTime=${BUILD_TIME}'" \
-    -trimpath -o velux-mqtt-gw .
+    -ldflags "-s -w -X 'github.com/mqtt-home/velux-to-mqtt-gw/version.Version=${VERSION}' -X 'github.com/mqtt-home/velux-to-mqtt-gw/version.GitCommit=${GIT_COMMIT}' -X 'github.com/mqtt-home/velux-to-mqtt-gw/version.BuildTime=${BUILD_TIME}'" \
+    -trimpath -o velux-to-mqtt-gw .
 
 # Final stage
 FROM gcr.io/distroless/static:nonroot
 
 WORKDIR /
-COPY --from=builder /app/velux-mqtt-gw /velux-mqtt-gw
+COPY --from=builder /app/velux-to-mqtt-gw /velux-to-mqtt-gw
 USER nonroot:nonroot
 
-ENTRYPOINT ["/velux-mqtt-gw", "/var/lib/velux-mqtt-gw/config.json"]
+ENTRYPOINT ["/velux-to-mqtt-gw", "/var/lib/velux-to-mqtt-gw/config.json"]

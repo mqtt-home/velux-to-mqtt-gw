@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/mqtt-home/velux-mqtt-gw/klf200/protocol"
+	"github.com/mqtt-home/velux-to-mqtt-gw/klf200/protocol"
 )
 
 // This file ports pyvlx's opening_device.py in full: the OpeningDevice base and

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/mqtt-home/velux-mqtt-gw/klf200/protocol"
+	"github.com/mqtt-home/velux-to-mqtt-gw/klf200/protocol"
 )
 
 // acceptCommand replays the confirmation (and, when waiting for completion, the

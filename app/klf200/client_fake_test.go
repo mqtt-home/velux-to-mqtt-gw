@@ -3,7 +3,7 @@ package klf200
 import (
 	"context"
 
-	"github.com/mqtt-home/velux-mqtt-gw/klf200/protocol"
+	"github.com/mqtt-home/velux-to-mqtt-gw/klf200/protocol"
 )
 
 // capturedCall records one request that passed through the fake APICall seam.

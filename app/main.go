@@ -9,10 +9,10 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/mqtt-home/velux-mqtt-gw/bridge"
-	"github.com/mqtt-home/velux-mqtt-gw/config"
-	"github.com/mqtt-home/velux-mqtt-gw/klf200"
-	"github.com/mqtt-home/velux-mqtt-gw/version"
+	"github.com/mqtt-home/velux-to-mqtt-gw/bridge"
+	"github.com/mqtt-home/velux-to-mqtt-gw/config"
+	"github.com/mqtt-home/velux-to-mqtt-gw/klf200"
+	"github.com/mqtt-home/velux-to-mqtt-gw/version"
 	"github.com/philipparndt/go-logger"
 	"github.com/philipparndt/mqtt-gateway/mqtt"
 )
@@ -38,7 +38,7 @@ func initPprof() {
 
 func main() {
 	logger.Init("info", logger.Logger())
-	logger.Info("velux-mqtt-gw",
+	logger.Info("velux-to-mqtt-gw",
 		"version", version.Version,
 		"commit", version.GitCommit,
 		"built", version.BuildTime,

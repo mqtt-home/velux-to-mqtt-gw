@@ -1,4 +1,4 @@
-# velux-mqtt-gw — Velux KLF200 to MQTT Bridge (Go)
+# velux-to-mqtt-gw — Velux KLF200 to MQTT Bridge (Go)
 
 A Go rewrite of the Python [vlxmqttha](https://github.com/tjaehnel/vlxmqttha) bridge. Exposes
 Velux KLF200 cover devices over MQTT with Home Assistant auto-discovery, live position/state
@@ -33,7 +33,7 @@ See [`app/config-example.json`](app/config-example.json) for a ready-to-copy tem
     "url": "tcp://192.168.1.10:1883",
     "username": "mqttuser",
     "password": "mqttpassword",
-    "client-id": "velux-mqtt-gw",
+    "client-id": "velux-to-mqtt-gw",
     "retain": true,
     "qos": 1,
     "topic": "velux"
@@ -119,7 +119,7 @@ so secrets can be injected without storing them in the file:
 
 ```bash
 cd app
-make build          # produces build/velux-mqtt-gw
+make build          # produces build/velux-to-mqtt-gw
 make test           # run unit tests
 make lint           # run golangci-lint
 ```
@@ -129,31 +129,31 @@ make lint           # run golangci-lint
 ```bash
 make run CONFIG=/path/to/config.json
 # or
-./build/velux-mqtt-gw /path/to/config.json
+./build/velux-to-mqtt-gw /path/to/config.json
 ```
 
 ### Build and run with Docker
 
 ```bash
 cd app
-make image          # builds mqtt-home/velux-mqtt-gw:latest
+make image          # builds mqtt-home/velux-to-mqtt-gw:latest
 
 docker run -d \
-  --name velux-mqtt-gw \
+  --name velux-to-mqtt-gw \
   --restart unless-stopped \
-  -v /path/to/config.json:/var/lib/velux-mqtt-gw/config.json:ro \
-  mqtt-home/velux-mqtt-gw:latest
+  -v /path/to/config.json:/var/lib/velux-to-mqtt-gw/config.json:ro \
+  mqtt-home/velux-to-mqtt-gw:latest
 ```
 
 ### Docker Compose
 
 ```yaml
 services:
-  velux-mqtt-gw:
-    image: mqtt-home/velux-mqtt-gw:latest
+  velux-to-mqtt-gw:
+    image: mqtt-home/velux-to-mqtt-gw:latest
     restart: unless-stopped
     volumes:
-      - ./config.json:/var/lib/velux-mqtt-gw/config.json:ro
+      - ./config.json:/var/lib/velux-to-mqtt-gw/config.json:ro
 ```
 
 ```bash
@@ -295,8 +295,8 @@ verbose = false
 
 ### Runtime changes
 
-- The binary takes the config file path as its only argument: `velux-mqtt-gw config.json`
+- The binary takes the config file path as its only argument: `velux-to-mqtt-gw config.json`
 - MQTT topic structure and payloads are identical to the Python version
 - Home Assistant auto-discovery topics and device entities are identical
-- The Docker image entry point is `/velux-mqtt-gw /var/lib/velux-mqtt-gw/config.json`
+- The Docker image entry point is `/velux-to-mqtt-gw /var/lib/velux-to-mqtt-gw/config.json`
 - Log output goes to stdout only; use Docker log drivers or shell redirection for file logging

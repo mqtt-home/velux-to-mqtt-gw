@@ -4,13 +4,13 @@ GOFLAGS = -v
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 GIT_COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME ?= $(shell date -u '+%Y-%m-%d %H:%M:%S UTC')
-LDFLAGS = -ldflags "-s -w -X 'github.com/mqtt-home/velux-mqtt-gw/version.Version=$(VERSION)' -X 'github.com/mqtt-home/velux-mqtt-gw/version.GitCommit=$(GIT_COMMIT)' -X 'github.com/mqtt-home/velux-mqtt-gw/version.BuildTime=$(BUILD_TIME)'"
+LDFLAGS = -ldflags "-s -w -X 'github.com/mqtt-home/velux-to-mqtt-gw/version.Version=$(VERSION)' -X 'github.com/mqtt-home/velux-to-mqtt-gw/version.GitCommit=$(GIT_COMMIT)' -X 'github.com/mqtt-home/velux-to-mqtt-gw/version.BuildTime=$(BUILD_TIME)'"
 
 BUILD_DIR = build
 CONFIG ?= $(PWD)/../production/config/config.json
 
-BINARY_NAME = velux-mqtt-gw
-DOCKER_IMAGE_NAME = mqtt-home/velux-mqtt-gw:latest
+BINARY_NAME = velux-to-mqtt-gw
+DOCKER_IMAGE_NAME = mqtt-home/velux-to-mqtt-gw:latest
 
 .PHONY: build
 build:

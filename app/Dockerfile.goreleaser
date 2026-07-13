@@ -6,9 +6,9 @@ FROM gcr.io/distroless/static:nonroot
 WORKDIR /
 
 # Copy the pre-built binary from GoReleaser
-COPY velux-mqtt-gw /velux-mqtt-gw
+COPY velux-to-mqtt-gw /velux-to-mqtt-gw
 
 # Use non-root user (distroless already provides this)
 USER nonroot:nonroot
 
-ENTRYPOINT ["/velux-mqtt-gw", "/var/lib/velux-mqtt-gw/config.json"]
+ENTRYPOINT ["/velux-to-mqtt-gw", "/var/lib/velux-to-mqtt-gw/config.json"]

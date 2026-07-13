@@ -1,7 +1,7 @@
 package bridge
 
 import (
-	"github.com/mqtt-home/velux-mqtt-gw/config"
+	"github.com/mqtt-home/velux-to-mqtt-gw/config"
 	gwconfig "github.com/philipparndt/mqtt-gateway/config"
 	"github.com/philipparndt/mqtt-gateway/mqtt"
 )
