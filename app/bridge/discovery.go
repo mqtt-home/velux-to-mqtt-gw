@@ -25,7 +25,6 @@ type discoveryDevice struct {
 type coverDiscoveryPayload struct {
 	Name                string                  `json:"name"`
 	UniqueID            string                  `json:"unique_id"`
-	ObjectID            string                  `json:"object_id"`
 	StateTopic          string                  `json:"state_topic"`
 	PositionTopic       string                  `json:"position_topic"`
 	CommandTopic        string                  `json:"command_topic"`
@@ -44,7 +43,6 @@ type coverDiscoveryPayload struct {
 type switchDiscoveryPayload struct {
 	Name         string                  `json:"name"`
 	UniqueID     string                  `json:"unique_id"`
-	ObjectID     string                  `json:"object_id"`
 	StateTopic   string                  `json:"state_topic"`
 	CommandTopic string                  `json:"command_topic"`
 	Icon         string                  `json:"icon"`
@@ -84,7 +82,6 @@ func buildCoverDiscovery(c *Cover) (topic string, payload []byte, err error) {
 	p := coverDiscoveryPayload{
 		Name:                c.node.Name(),
 		UniqueID:            c.id,
-		ObjectID:            c.id,
 		StateTopic:          t.State,
 		PositionTopic:       t.Position,
 		CommandTopic:        t.Set,
@@ -133,7 +130,6 @@ func buildSwitchDiscovery(c *Cover) (topic string, payload []byte, err error) {
 	p := switchDiscoveryPayload{
 		Name:         c.node.Name() + " Keep open",
 		UniqueID:     keepOpenID,
-		ObjectID:     keepOpenID,
 		StateTopic:   t.KeepOpenState,
 		CommandTopic: t.KeepOpenSet,
 		Icon:         "mdi:lock-outline",
