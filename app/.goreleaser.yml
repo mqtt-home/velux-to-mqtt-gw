@@ -41,7 +41,7 @@ dockers:
     goos: linux
     goarch: arm64
     build_flag_templates:
-      - "--platform=linux/arm64"
+      - "--platform=linux/arm64/v8"
     skip_push: false
 
   - image_templates:
