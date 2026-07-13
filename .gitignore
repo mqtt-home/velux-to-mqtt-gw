@@ -1,8 +1,9 @@
 # Binaries
-/app/velux-to-mqtt-gw
+/app/build/
 *.exe
 *.test
 *.out
+coverage.html
 
 # goreleaser / build output
 /app/dist/
