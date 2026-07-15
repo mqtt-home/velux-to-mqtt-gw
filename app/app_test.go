@@ -11,16 +11,23 @@ import (
 )
 
 // fakeKLF is a test double for the klfClient seam. It records the ordered
-// sequence of lifecycle calls so a test can assert the exact reset choreography
-// (clean Disconnect BEFORE reconnect/reauth/reload) without any hardware. It can
-// also be made to fail connect to model a still-wedged gateway.
+// sequence of lifecycle calls so a test can assert exact choreography
+// (e.g. reboot BEFORE reconnect) without any hardware. Various knobs make
+// Connect and Reboot fail on demand to model wedged gateways and reboot
+// failures.
 type fakeKLF struct {
 	mu           sync.Mutex
 	calls        []string
-	connectErr   error // returned from Connect while set (models a wedged gateway)
-	disconnected int
-	connected    int
-	loaded       int
+	connectErr   error // returned from Connect while set
+	// connectErrsUntil, when > 0, decrements on every Connect call and returns
+	// connectErr until it hits zero (models a gateway that takes N attempts to
+	// come back after a reboot).
+	connectErrsUntil int
+	rebootErr        error
+	disconnected     int
+	connected        int
+	loaded           int
+	rebooted         int
 }
 
 func (f *fakeKLF) record(s string) {
@@ -32,7 +39,16 @@ func (f *fakeKLF) record(s string) {
 func (f *fakeKLF) Connect(_ context.Context) error {
 	f.record("connect")
 	f.mu.Lock()
-	err := f.connectErr
+	var err error
+	if f.connectErrsUntil > 0 {
+		f.connectErrsUntil--
+		err = f.connectErr
+		if err == nil {
+			err = errors.New("simulated post-reboot delay")
+		}
+	} else if f.connectErr != nil {
+		err = f.connectErr
+	}
 	if err == nil {
 		f.connected++
 	}
@@ -68,6 +84,15 @@ func (f *fakeKLF) LoadNodes(_ context.Context) error {
 	return nil
 }
 
+func (f *fakeKLF) Reboot(_ context.Context) error {
+	f.record("reboot")
+	f.mu.Lock()
+	f.rebooted++
+	err := f.rebootErr
+	f.mu.Unlock()
+	return err
+}
+
 func (f *fakeKLF) snapshot() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -76,9 +101,7 @@ func (f *fakeKLF) snapshot() []string {
 	return out
 }
 
-// fakeManager is a test double for the coverManager seam. It counts Register /
-// availability / CloseAll invocations so tests can assert re-registration on
-// reset, offline/online transitions on wedge/recovery, and shutdown ordering.
+// fakeManager is a test double for the coverManager seam.
 type fakeManager struct {
 	mu          sync.Mutex
 	registers   int
@@ -125,11 +148,18 @@ func (m *fakeManager) counts() (reg, unavail, avail, close int) {
 	return m.registers, m.unavailable, m.available, m.closeAll
 }
 
-// newTestApp builds an App wired entirely to fakes: no real klf200.Client, no
-// real bridge.Manager, no real heartbeat. The heartbeat lifecycle is replaced
-// with counters, and MQTT is represented only by the absence of any teardown
-// (the fakes never touch it), so "MQTT stays up across a reset" is expressed as
-// "no MQTT-affecting call happens during doReset".
+// withFastReboot swaps the reboot-backoff schedule to zero-duration slots so
+// tests do not sleep. Returns a restore function. attempts is how many attempts
+// the schedule should permit.
+func withFastReboot(t *testing.T, attempts int) {
+	t.Helper()
+	old := rebootBackoffSchedule
+	sched := make([]time.Duration, attempts)
+	rebootBackoffSchedule = sched
+	t.Cleanup(func() { rebootBackoffSchedule = old })
+}
+
+// newTestApp builds an App wired entirely to fakes.
 func newTestApp(cfg config.Config) (*App, *fakeKLF, *fakeManager, *int) {
 	klf := &fakeKLF{}
 	mgr := &fakeManager{}
@@ -137,7 +167,7 @@ func newTestApp(cfg config.Config) (*App, *fakeKLF, *fakeManager, *int) {
 	a := &App{
 		cfg:    cfg,
 		client: nil, // nil => connectAndLoad skips the real house-monitor call
-		mgr:    nil, // never used: Stop/CloseAll go through the cm seam
+		mgr:    nil,
 		klf:    klf,
 		cm:     mgr,
 		now:    time.Now,
@@ -148,23 +178,17 @@ func newTestApp(cfg config.Config) (*App, *fakeKLF, *fakeManager, *int) {
 	return a, klf, mgr, &hbStarts
 }
 
-// TestPeriodicResetCycle asserts a periodic reset performs an in-process CLEAN
-// disconnect FIRST, then reconnect + reauth + reload + re-register, restarts the
-// heartbeat, and never calls CloseAll (which would flap HA) — i.e. MQTT/HA are
-// left untouched.
-func TestPeriodicResetCycle(t *testing.T) {
+// TestDoReconnect asserts the reconnect primitive performs a clean disconnect
+// FIRST, then the reconnect + reauth + reload sequence, restarts the
+// heartbeat, and never calls CloseAll (which would flap HA).
+func TestDoReconnect(t *testing.T) {
 	a, klf, mgr, hbStarts := newTestApp(config.Config{})
-	// Zero the reconnect delay so the test does not actually sleep 2s.
-	oldDelay := resetReconnectDelay
-	resetReconnectDelay = 0
-	defer func() { resetReconnectDelay = oldDelay }()
 
-	if err := a.doReset(context.Background()); err != nil {
-		t.Fatalf("doReset: %v", err)
+	if err := a.doReconnect(context.Background()); err != nil {
+		t.Fatalf("doReconnect: %v", err)
 	}
 
 	got := klf.snapshot()
-	// The clean disconnect must come first, then the reconnect sequence.
 	want := []string{"disconnect", "connect", "password", "setutc", "load"}
 	if len(got) != len(want) {
 		t.Fatalf("klf calls = %v, want %v", got, want)
@@ -180,13 +204,118 @@ func TestPeriodicResetCycle(t *testing.T) {
 
 	reg, unavail, avail, closeAll := mgr.counts()
 	if reg != 1 {
-		t.Fatalf("Register calls = %d, want 1 (re-register after reset)", reg)
+		t.Fatalf("Register calls = %d, want 1", reg)
 	}
-	if closeAll != 0 {
-		t.Fatalf("CloseAll during reset = %d, want 0 (HA must not flap)", closeAll)
+	if closeAll != 0 || unavail != 0 || avail != 0 {
+		t.Fatalf("HA-flapping calls unexpected: closeAll=%d unavail=%d avail=%d", closeAll, unavail, avail)
 	}
-	if unavail != 0 || avail != 0 {
-		t.Fatalf("availability toggled during clean reset: unavail=%d avail=%d, want 0/0", unavail, avail)
+	if *hbStarts != 1 {
+		t.Fatalf("heartbeat restarts = %d, want 1", *hbStarts)
+	}
+}
+
+// TestDoRebootHappyPath asserts a reboot sends GW_REBOOT_REQ, then reconnects
+// on the first backoff attempt and restarts the heartbeat.
+func TestDoRebootHappyPath(t *testing.T) {
+	a, klf, mgr, hbStarts := newTestApp(config.Config{})
+	withFastReboot(t, 3)
+
+	if err := a.doReboot(context.Background()); err != nil {
+		t.Fatalf("doReboot: %v", err)
+	}
+
+	if klf.rebooted != 1 {
+		t.Fatalf("reboot calls = %d, want 1", klf.rebooted)
+	}
+	got := klf.snapshot()
+	// Reboot first, then a local disconnect to clean up state, then the
+	// reconnect sequence.
+	want := []string{"reboot", "disconnect", "connect", "password", "setutc", "load"}
+	if len(got) != len(want) {
+		t.Fatalf("klf calls = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("klf call[%d] = %q, want %q (full %v)", i, got[i], want[i], got)
+		}
+	}
+	if reg, _, _, closeAll := mgr.counts(); reg != 1 || closeAll != 0 {
+		t.Fatalf("Register=%d closeAll=%d, want 1/0", reg, closeAll)
+	}
+	if *hbStarts != 1 {
+		t.Fatalf("heartbeat restarts = %d, want 1", *hbStarts)
+	}
+}
+
+// TestDoRebootRetriesUntilSuccess asserts the backoff loop retries a failing
+// reconnect and eventually succeeds when the gateway comes back.
+func TestDoRebootRetriesUntilSuccess(t *testing.T) {
+	a, klf, _, hbStarts := newTestApp(config.Config{})
+	withFastReboot(t, 5)
+	// First 3 reconnect attempts fail, 4th succeeds.
+	klf.connectErrsUntil = 3
+
+	if err := a.doReboot(context.Background()); err != nil {
+		t.Fatalf("doReboot: %v", err)
+	}
+	if klf.connected != 1 {
+		t.Fatalf("connected = %d, want 1 (only the successful one)", klf.connected)
+	}
+	// The fake records every Connect regardless of error, so we expect 4 total.
+	connects := 0
+	for _, c := range klf.snapshot() {
+		if c == "connect" {
+			connects++
+		}
+	}
+	if connects != 4 {
+		t.Fatalf("Connect attempts = %d, want 4", connects)
+	}
+	if *hbStarts != 1 {
+		t.Fatalf("heartbeat restarts = %d, want 1", *hbStarts)
+	}
+}
+
+// TestDoRebootExhaustsBudget asserts that if every reconnect attempt fails the
+// function returns an error and does NOT restart the heartbeat.
+func TestDoRebootExhaustsBudget(t *testing.T) {
+	a, klf, _, hbStarts := newTestApp(config.Config{})
+	withFastReboot(t, 3)
+	klf.connectErr = errors.New("gateway still down")
+
+	if err := a.doReboot(context.Background()); err == nil {
+		t.Fatalf("doReboot: want error, got nil")
+	}
+	// All 3 attempts must have been tried.
+	connects := 0
+	for _, c := range klf.snapshot() {
+		if c == "connect" {
+			connects++
+		}
+	}
+	if connects != 3 {
+		t.Fatalf("Connect attempts = %d, want 3", connects)
+	}
+	if *hbStarts != 0 {
+		t.Fatalf("heartbeat restarts = %d, want 0 (reboot failed)", *hbStarts)
+	}
+}
+
+// TestDoRebootRebootErrorIsNonFatal asserts that if GW_REBOOT_REQ itself
+// errors, the function still proceeds to the reconnect loop.
+func TestDoRebootRebootErrorIsNonFatal(t *testing.T) {
+	a, klf, _, hbStarts := newTestApp(config.Config{})
+	withFastReboot(t, 2)
+	klf.rebootErr = errors.New("session already gone")
+
+	if err := a.doReboot(context.Background()); err != nil {
+		t.Fatalf("doReboot: %v", err)
+	}
+	if klf.rebooted != 1 {
+		t.Fatalf("reboot calls = %d, want 1 (attempted despite error)", klf.rebooted)
+	}
+	if klf.connected != 1 {
+		t.Fatalf("connected = %d, want 1 (reconnect proceeded)", klf.connected)
 	}
 	if *hbStarts != 1 {
 		t.Fatalf("heartbeat restarts = %d, want 1", *hbStarts)
@@ -202,14 +331,13 @@ func TestWedgeMarksOfflineAndRetries(t *testing.T) {
 	cfg.Restart.RestartOnError = true
 
 	a, klf, mgr, _ := newTestApp(cfg)
-	resetReconnectDelay = 0
+	withFastReboot(t, 1)
 	// Make the reconnect keep failing so the gateway stays "wedged".
 	klf.connectErr = errors.New("still wedged")
 
 	// Freeze a clock far past the threshold (10s x 2 = 20s window).
 	base := time.Unix(1_000_000, 0)
 	a.now = func() time.Time { return base }
-	// Stamp contact well in the past.
 	a.lastContact.Store(base.Add(-60 * time.Second).UnixNano())
 
 	// First tick: should trip the wedge (offline once) and attempt a reconnect
@@ -240,16 +368,17 @@ func TestWedgeMarksOfflineAndRetries(t *testing.T) {
 	}
 }
 
-// TestWedgeRecoveryRestoresAvailability asserts that once the gateway is
-// reachable again, a health-check-driven reconnect succeeds, reloads, and
-// restores availability (online).
-func TestWedgeRecoveryRestoresAvailability(t *testing.T) {
+// TestWedgeRecoveryTriggersReboot asserts that on wedge recovery the health
+// check first reconnects (doReconnect) and then immediately reboots the
+// gateway (doReboot) to clear any zombie session slot, restoring availability
+// only after the reboot completes.
+func TestWedgeRecoveryTriggersReboot(t *testing.T) {
 	cfg := config.Config{}
 	cfg.Restart.HealthCheckInterval = 10
 	cfg.Restart.RestartOnError = true
 
 	a, klf, mgr, _ := newTestApp(cfg)
-	resetReconnectDelay = 0
+	withFastReboot(t, 2)
 	klf.connectErr = errors.New("wedged")
 
 	base := time.Unix(2_000_000, 0)
@@ -262,8 +391,7 @@ func TestWedgeRecoveryRestoresAvailability(t *testing.T) {
 		t.Fatalf("expected wedged")
 	}
 
-	// Gateway recovers: connect now succeeds. doReset within checkHealth reloads
-	// and stamps contact; recovery restores availability.
+	// Gateway recovers: connect now succeeds.
 	klf.mu.Lock()
 	klf.connectErr = nil
 	klf.mu.Unlock()
@@ -272,15 +400,11 @@ func TestWedgeRecoveryRestoresAvailability(t *testing.T) {
 	if a.wedged.Load() {
 		t.Fatalf("expected recovery to clear wedged")
 	}
-	reg, _, avail, _ := mgr.counts()
-	if avail < 1 {
+	if klf.rebooted != 1 {
+		t.Fatalf("reboot calls = %d, want 1 (reactive reboot after wedge recovery)", klf.rebooted)
+	}
+	if _, _, avail, _ := mgr.counts(); avail < 1 {
 		t.Fatalf("MarkAllAvailable calls = %d, want >=1 after recovery", avail)
-	}
-	if reg < 1 {
-		t.Fatalf("Register calls = %d, want >=1 (reload on recovery)", reg)
-	}
-	if klf.loaded < 1 {
-		t.Fatalf("expected LoadNodes on recovery reconnect")
 	}
 }
 
@@ -295,18 +419,12 @@ func TestShutdownOrdering(t *testing.T) {
 
 	a.Stop()
 
-	// CloseAll must happen (discovery cleanup + covers offline).
 	if _, _, _, closeAll := mgr.counts(); closeAll != 1 {
 		t.Fatalf("CloseAll calls = %d, want 1", closeAll)
 	}
-	// A clean KLF200 disconnect must happen on shutdown.
 	if klf.disconnected != 1 {
 		t.Fatalf("Disconnect calls = %d, want 1", klf.disconnected)
 	}
-	// Ordering: CloseAll (HA cleanup) BEFORE the clean disconnect. The manager
-	// records "closeall"; the klf records "disconnect". Assert closeall was the
-	// last manager action and disconnect the only klf action, and that CloseAll
-	// preceded Disconnect by checking neither reconnect nor register ran.
 	if len(klf.snapshot()) != 1 || klf.snapshot()[0] != "disconnect" {
 		t.Fatalf("klf calls on shutdown = %v, want exactly [disconnect]", klf.snapshot())
 	}
@@ -314,7 +432,7 @@ func TestShutdownOrdering(t *testing.T) {
 		t.Fatalf("heartbeat stop calls = %d, want >=1", stopHBCalls)
 	}
 
-	// Idempotent: a second Stop must not double-disconnect or double-close.
+	// Idempotent.
 	a.Stop()
 	if _, _, _, closeAll := mgr.counts(); closeAll != 1 {
 		t.Fatalf("CloseAll after second Stop = %d, want still 1 (idempotent)", closeAll)

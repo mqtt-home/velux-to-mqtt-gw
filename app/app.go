@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,10 +19,19 @@ import (
 // HEALTH_CHECK_FAILURE_THRESHOLD (2.0).
 const healthCheckFailureThreshold = 2.0
 
-// resetReconnectDelay is how long we wait between the clean disconnect and the
-// reconnect during a periodic reset, giving the KLF200 time to release the slot.
-// A var (not const) so tests can zero it to avoid a real sleep.
-var resetReconnectDelay = 2 * time.Second
+// rebootBackoffSchedule is the wait-between-attempts schedule for reconnecting
+// to the gateway after a device reboot. Attempts are made after each duration
+// in the slice in order; total wall-clock is the sum (~5 min). A var so tests
+// can shrink it to zero-duration slots to avoid real sleeps.
+var rebootBackoffSchedule = []time.Duration{
+	2 * time.Second,
+	5 * time.Second,
+	10 * time.Second,
+	30 * time.Second,
+	60 * time.Second,
+	90 * time.Second,
+	120 * time.Second,
+}
 
 // klfClient is the seam over the concrete *klf200.Client the App drives. It
 // covers the whole connect/authenticate/reload lifecycle plus the accessors the
@@ -34,6 +44,7 @@ type klfClient interface {
 	PasswordEnter(ctx context.Context, password string) error
 	SetUTC(ctx context.Context, t time.Time) error
 	LoadNodes(ctx context.Context) error
+	Reboot(ctx context.Context) error
 }
 
 // coverManager is the seam over *bridge.Manager. Register re-runs discovery +
@@ -48,7 +59,7 @@ type coverManager interface {
 }
 
 // App wires config -> klf200 client -> bridge manager and owns the background
-// loops (heartbeat, health check, periodic reset). It is the Go counterpart of
+// loops (heartbeat, health check, periodic reboot). It is the Go counterpart of
 // the Python VeluxMqttHomeassistant plus its asyncio task set, but with the
 // process-exit restart replaced by an in-process clean session reset.
 type App struct {
@@ -86,8 +97,9 @@ type App struct {
 	// the health check only logs the transition once and restores on recovery.
 	wedged atomic.Bool
 
-	// resetMu serializes a periodic reset against a health-check-driven reconnect
-	// so the two never disconnect/reconnect concurrently.
+	// resetMu serializes the reboot/reconnect paths (startup reboot, periodic
+	// reboot loop, and the health-check wedge-recovery reconnect+reboot) so
+	// they never race each other on the KLF200 connection.
 	resetMu sync.Mutex
 
 	mu       sync.Mutex
@@ -145,9 +157,18 @@ func (a *App) Start(ctx context.Context) error {
 	// Heartbeat: keepalive + liveness. Its confirmations stamp lastContact.
 	a.startHeartbeatFn()
 
+	// Startup reboot: clear any zombie session slots left by a prior unclean
+	// shutdown. KLF200 has only 2 API slots and does not garbage-collect
+	// abandoned ones, so a fresh startup can otherwise inherit a wedged state
+	// that only a device reboot can recover from.
+	logger.Info("Rebooting KLF200 on startup to clear any zombie session slots")
+	if err := a.doReboot(ctx); err != nil {
+		return fmt.Errorf("startup reboot: %w", err)
+	}
+
 	// Background loops.
 	a.startHealthCheck()
-	a.startResetLoop()
+	a.startRebootLoop()
 
 	logger.Info("Application is now ready")
 	return nil
@@ -249,15 +270,16 @@ func (a *App) startHealthCheck() {
 	}()
 }
 
-// startResetLoop launches the periodic clean-reset loop. Disabled when the
-// interval is 0. Each tick performs an in-process clean disconnect/reconnect.
-func (a *App) startResetLoop() {
+// startRebootLoop launches the periodic device-reboot loop. Disabled when the
+// interval is 0. Each tick sends GW_REBOOT_REQ and reconnects with backoff,
+// freeing both KLF200 session slots (ours and any zombie).
+func (a *App) startRebootLoop() {
 	interval := time.Duration(a.cfg.Restart.RestartInterval) * time.Hour
 	if interval <= 0 {
-		logger.Info("Periodic reset disabled")
+		logger.Info("Periodic reboot disabled")
 		return
 	}
-	logger.Info("Periodic reset enabled", "interval", interval)
+	logger.Info("Periodic reboot enabled", "interval", interval)
 
 	a.loopsWG.Add(1)
 	go func() {
@@ -269,9 +291,9 @@ func (a *App) startResetLoop() {
 			case <-a.stopCh:
 				return
 			case <-ticker.C:
-				logger.Info("Periodic reset triggered")
-				if err := a.doReset(context.Background()); err != nil {
-					logger.Error("Periodic reset failed", "error", err)
+				logger.Info("Periodic reboot triggered")
+				if err := a.doReboot(context.Background()); err != nil {
+					logger.Error("Periodic reboot failed", "error", err)
 				}
 			}
 		}
@@ -330,41 +352,43 @@ func (a *App) checkHealth(ctx context.Context) {
 	// Keep retrying reconnect visibly. A successful reset restores availability
 	// (and clears the wedged flag) via the healthy branch on the next tick.
 	logger.Info("Attempting KLF200 reconnect after wedge")
-	if err := a.doReset(ctx); err != nil {
+	if err := a.doReconnect(ctx); err != nil {
 		logger.Warn("KLF200 reconnect attempt failed", "error", err)
 		return
 	}
+
+	// Reconnected — but the wedge may have been caused by a zombie session slot
+	// the reconnect itself cannot free. Reboot the device to guarantee a clean
+	// slate before declaring recovery.
+	logger.Info("KLF200 reconnected, rebooting to clear zombie session slots")
+	if err := a.doReboot(ctx); err != nil {
+		logger.Warn("KLF200 post-recovery reboot failed", "error", err)
+		return
+	}
+
 	if a.wedged.CompareAndSwap(true, false) {
-		logger.Info("KLF200 reconnected after wedge")
+		logger.Info("KLF200 recovered after wedge")
 		a.cm.MarkAllAvailable()
 	}
 }
 
-// doReset performs an in-process CLEAN session reset: stop the heartbeat, cleanly
-// disconnect from the KLF200 (releasing the API session slot), wait briefly,
-// reconnect + re-authenticate + reload nodes + re-register callbacks, re-publish
-// discovery/state, and restart the heartbeat. The MQTT connection stays up the
-// whole time so HA entities do not flap. This replaces the Python bridge's
-// process-exit restart. It is the injectable body used by both the periodic
-// reset loop and the health-check reconnect. Serialized via resetMu.
-func (a *App) doReset(ctx context.Context) error {
+// doReconnect performs an in-process reconnect without rebooting the gateway:
+// stop the heartbeat, clean-disconnect (freeing our slot), reconnect +
+// re-authenticate + reload nodes + re-register callbacks + restart heartbeat.
+// The MQTT connection stays up so HA entities do not flap. Used by the
+// health-check wedge-recovery path where we first need a live session before
+// we can even ask the gateway to reboot. Serialized via resetMu.
+func (a *App) doReconnect(ctx context.Context) error {
 	a.resetMu.Lock()
 	defer a.resetMu.Unlock()
 
 	// Pause the heartbeat so it does not race the disconnect/reconnect.
 	a.stopHeartbeatFn()
 
-	// CLEAN disconnect: this is the active ingredient that frees the slot.
+	// Clean-disconnect any half-open state.
 	logger.Info("KLF200 clean disconnect (releasing session slot)")
 	if err := a.klf.Disconnect(); err != nil {
 		logger.Warn("KLF200 disconnect returned error (continuing)", "error", err)
-	}
-
-	// Give the gateway a moment to release the slot before reacquiring.
-	select {
-	case <-time.After(resetReconnectDelay):
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 
 	// Reconnect + re-authenticate + reload nodes + re-register node updater.
@@ -381,8 +405,73 @@ func (a *App) doReset(ctx context.Context) error {
 	// Restart the heartbeat against the fresh connection.
 	a.startHeartbeatFn()
 
-	logger.Info("KLF200 session reset complete")
+	logger.Info("KLF200 reconnect complete")
 	return nil
+}
+
+// doReboot performs a device-level KLF200 reboot via GW_REBOOT_REQ. The gateway
+// drops the TCP session as part of the reboot; we then reconnect with an
+// exponential-backoff schedule (rebootBackoffSchedule) until the gateway is
+// reachable again, and re-run the full connect/load/register/heartbeat
+// sequence. This is the ONLY path that frees a zombie session slot the KLF200
+// forgot to expire — a plain reconnect cannot. Serialized via resetMu.
+//
+// Callers: startup (clear inherited zombies), periodic loop (prophylactic
+// daily reboot), and the health-check wedge-recovery branch (belt-and-braces
+// after a successful reconnect).
+func (a *App) doReboot(ctx context.Context) error {
+	a.resetMu.Lock()
+	defer a.resetMu.Unlock()
+
+	// Pause the heartbeat so it does not race the reboot/reconnect.
+	a.stopHeartbeatFn()
+
+	// Send GW_REBOOT_REQ. If the session is already gone (e.g. we were called
+	// from a wedge-recovery path where Reconnect just ran but the connection
+	// dropped again in between), the send may fail — proceed to the reconnect
+	// loop anyway; the gateway may have rebooted or may just need a fresh
+	// session.
+	logger.Info("KLF200 reboot requested (GW_REBOOT_REQ)")
+	if err := a.klf.Reboot(ctx); err != nil {
+		logger.Warn("KLF200 reboot request returned error (continuing to reconnect)", "error", err)
+	}
+
+	// The gateway drops the TCP session as part of the reboot; clean up our
+	// local Client state (unregister callbacks, close socket) so the following
+	// Connect starts from a known-clean slate.
+	if err := a.klf.Disconnect(); err != nil {
+		logger.Debug("KLF200 disconnect after reboot returned error (expected)", "error", err)
+	}
+
+	// Reconnect with exponential backoff. The KLF200 typically takes 60–90s to
+	// come back; the schedule covers that with headroom.
+	var lastErr error
+	for i, wait := range rebootBackoffSchedule {
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
+		if err := a.connectAndLoad(ctx); err != nil {
+			lastErr = err
+			logger.Info("KLF200 post-reboot reconnect attempt failed",
+				"attempt", i+1, "of", len(rebootBackoffSchedule), "error", err)
+			// Best-effort local cleanup before the next attempt.
+			_ = a.klf.Disconnect()
+			continue
+		}
+
+		if err := a.cm.Register(ctx); err != nil {
+			return fmt.Errorf("post-reboot register: %w", err)
+		}
+		a.startHeartbeatFn()
+		logger.Info("KLF200 reboot complete, reconnected", "attempt", i+1)
+		return nil
+	}
+
+	return fmt.Errorf("KLF200 post-reboot reconnect exhausted %d attempts: %w",
+		len(rebootBackoffSchedule), lastErr)
 }
 
 // Stop tears down the background loops, clears HA discovery, performs a CLEAN

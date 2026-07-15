@@ -14,7 +14,9 @@ updates, the keep-open limitation feature, and a built-in watchdog for unattende
 - Live `open`/`closed`/`opening`/`closing` state and `0–100` position reporting
 - Keep-open switch per cover: limits how far the cover may close
 - Automatic health monitoring: periodic heartbeat to the KLF200
-- Configurable auto-restart on connection loss or on a fixed interval
+- Device-level KLF200 reboot on startup, periodically, and after a wedge —
+  freeing both API session slots (KLF200 has only 2 and never garbage-collects
+  them), so the bridge self-heals from zombie-slot lockups
 - Single static binary, no runtime dependencies; multi-arch Docker image (amd64, arm64, armv6, armv7)
 
 ---
@@ -87,9 +89,17 @@ See [`app/config-example.json`](app/config-example.json) for a ready-to-copy tem
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `restart-interval` | integer | `24` | Exit and let the process supervisor restart after N hours (0 = disabled) |
+| `restart-interval` | integer | `24` | Reboot the KLF200 device (via `GW_REBOOT_REQ`) every N hours; frees both API session slots. `0` disables the periodic reboot (the startup reboot still runs) |
 | `health-check-interval` | integer | `300` | Send a KLF200 heartbeat every N seconds (0 = disabled) |
-| `restart-on-error` | bool | `true` | Exit when a connection error is detected so the supervisor can restart |
+| `restart-on-error` | bool | `true` | On a wedge (no KLF200 contact within `health-check-interval × 2`), reconnect and then reboot the gateway to clear any zombie session slot |
+
+> **Startup and reboot timing.** The bridge always reboots the KLF200 once
+> during startup to clear any zombie session slots left by a previous unclean
+> shutdown. This adds ~60–90 s to the initial bring-up. Container
+> orchestrators (Docker `healthcheck`, Kubernetes readiness probes) should
+> use a `start_period` / `initialDelaySeconds` of at least **120 s**.
+> Each periodic reboot causes the same ~60–90 s window during which HA covers
+> are marked unavailable; the default 24 h interval keeps this to once per day.
 
 #### `loglevel` (optional)
 
@@ -232,9 +242,9 @@ converting the `vlxmqttha.conf` INI file to a `config.json` JSON file.
 | `[velux]` | `password` | `velux.password` | |
 | `[homeassistant]` | `prefix` | `homeassistant.prefix` | |
 | `[homeassistant]` | `invert_awning` | `homeassistant.invert-awning` | Underscore becomes hyphen |
-| `[restart]` | `restart_interval` | `restart.restart-interval` | Unit stays hours |
+| `[restart]` | `restart_interval` | `restart.restart-interval` | Unit stays hours. Semantics change: now reboots the KLF200 device instead of just restarting the process |
 | `[restart]` | `health_check_interval` | `restart.health-check-interval` | Unit stays seconds |
-| `[restart]` | `restart_on_error` | `restart.restart-on-error` | |
+| `[restart]` | `restart_on_error` | `restart.restart-on-error` | Semantics change: now triggers an in-process reconnect + device reboot instead of a process exit |
 | `[log]` | `verbose = true` | `loglevel` | Set to `"debug"` |
 | `[log]` | `klf200 = true` | `loglevel` | Set to `"debug"` |
 | `[log]` | `logfile` | — | Not supported; redirect stdout in your shell/Docker |
