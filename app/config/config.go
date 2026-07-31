@@ -47,10 +47,40 @@ type HomeAssistantConfig struct {
 }
 
 // RestartConfig controls the watchdog / restart behaviour.
+//
+// The PowerCycle* fields configure the last-resort recovery. The KLF200's
+// network subsystem can freeze in a way the soft GW_REBOOT_REQ does not clear —
+// the device re-accepts TCP within ~2s, far too fast for a genuine boot, and the
+// covers stay dead. Only cutting mains recovers that state. When the gateway is
+// wired through an MQTT-controllable smart plug, set PowerCycleTopic and the
+// bridge performs the cycle itself instead of logging "manual power-cycle
+// required" and waiting for a human.
+//
+// The feature is off unless PowerCycleTopic is set; the rest has defaults.
 type RestartConfig struct {
 	RestartInterval     int  `json:"restart-interval"`
 	HealthCheckInterval int  `json:"health-check-interval"`
 	RestartOnError      bool `json:"restart-on-error"`
+
+	// PowerCycleTopic is the plug's command topic, e.g. "hs100/velux_reset/set"
+	// (hs100-to-mqtt-gw), "cmnd/plug/POWER" (Tasmota), or
+	// "shellies/<id>/relay/0/command" (Shelly Gen1). Empty = disabled.
+	PowerCycleTopic string `json:"power-cycle-topic"`
+	// PowerCycleOffPayload / PowerCycleOnPayload cut and restore power. The
+	// defaults "OFF"/"ON" suit Tasmota, Shelly and hs100-to-mqtt-gw alike.
+	PowerCycleOffPayload string `json:"power-cycle-off-payload"`
+	PowerCycleOnPayload  string `json:"power-cycle-on-payload"`
+	// PowerCycleOffSeconds is the dwell with power removed — long enough for the
+	// gateway's capacitors to drain, or the freeze can survive the cycle.
+	// Default 10.
+	PowerCycleOffSeconds int `json:"power-cycle-off-seconds"`
+}
+
+// PowerCycleEnabled reports whether the external power-cycle escalation is
+// configured. Single gate for the feature: no topic means nothing is ever
+// published and the wedge path keeps its previous behaviour.
+func (r RestartConfig) PowerCycleEnabled() bool {
+	return r.PowerCycleTopic != ""
 }
 
 // Config is the top-level configuration for the velux-to-mqtt-gw bridge.
@@ -75,6 +105,17 @@ func ApplyDefaults(c *Config) {
 	}
 	if c.Restart.HealthCheckInterval == 0 {
 		c.Restart.HealthCheckInterval = 300
+	}
+	// Power-cycle payload/dwell defaults apply whether or not the feature is
+	// enabled, so a config that only sets the topic is complete.
+	if c.Restart.PowerCycleOffPayload == "" {
+		c.Restart.PowerCycleOffPayload = "OFF"
+	}
+	if c.Restart.PowerCycleOnPayload == "" {
+		c.Restart.PowerCycleOnPayload = "ON"
+	}
+	if c.Restart.PowerCycleOffSeconds == 0 {
+		c.Restart.PowerCycleOffSeconds = 10
 	}
 	if c.LogLevel == "" {
 		c.LogLevel = "info"

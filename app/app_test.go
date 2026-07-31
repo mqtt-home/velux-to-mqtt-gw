@@ -16,9 +16,9 @@ import (
 // Connect and Reboot fail on demand to model wedged gateways and reboot
 // failures.
 type fakeKLF struct {
-	mu           sync.Mutex
-	calls        []string
-	connectErr   error // returned from Connect while set
+	mu         sync.Mutex
+	calls      []string
+	connectErr error // returned from Connect while set
 	// connectErrsUntil, when > 0, decrements on every Connect call and returns
 	// connectErr until it hits zero (models a gateway that takes N attempts to
 	// come back after a reboot).
@@ -439,5 +439,256 @@ func TestShutdownOrdering(t *testing.T) {
 	}
 	if klf.disconnected != 1 {
 		t.Fatalf("Disconnect after second Stop = %d, want still 1 (idempotent)", klf.disconnected)
+	}
+}
+
+// ─── power-cycle escalation ──────────────────────────────────────────────────
+
+// recordedPublish is one captured MQTT publish from the power-cycle seam.
+type recordedPublish struct {
+	topic    string
+	payload  string
+	retained bool
+}
+
+// withPlug configures the power-cycle feature on cfg and installs a recording
+// publish seam on a. The returned func snapshots what was published.
+//
+// Dwell is left at 0s on purpose: ApplyDefaults would set 10, but these tests
+// construct config directly, and a zero dwell makes time.After fire immediately
+// so the tests do not sleep.
+func withPlug(a *App, topic string) func() []recordedPublish {
+	var mu sync.Mutex
+	var pubs []recordedPublish
+	a.cfg.Restart.PowerCycleTopic = topic
+	a.cfg.Restart.PowerCycleOffPayload = "OFF"
+	a.cfg.Restart.PowerCycleOnPayload = "ON"
+	a.publishFn = func(t, p string, retained bool) {
+		mu.Lock()
+		pubs = append(pubs, recordedPublish{t, p, retained})
+		mu.Unlock()
+	}
+	return func() []recordedPublish {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([]recordedPublish, len(pubs))
+		copy(out, pubs)
+		return out
+	}
+}
+
+// TestPowerCycleEscalationAfterFailedReconnect is the core of the feature: a
+// gateway that will not even take a fresh session must be power-cycled, and the
+// bridge must come all the way back afterwards (connect, re-register, heartbeat)
+// and restore availability.
+func TestPowerCycleEscalationAfterFailedReconnect(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Restart.HealthCheckInterval = 10
+	cfg.Restart.RestartOnError = true
+
+	a, klf, mgr, hbStarts := newTestApp(cfg)
+	withFastReboot(t, 2)
+	pubs := withPlug(a, "hs100/velux_reset/set")
+
+	// The gateway refuses the first connect (so doReconnect fails and we
+	// escalate), then answers once power has been cut and restored. Only the
+	// counter is set — also setting connectErr would feed the fake's
+	// permanent-failure branch, and Connect would never succeed again.
+	klf.connectErrsUntil = 1
+
+	base := time.Unix(2_000_000, 0)
+	a.now = func() time.Time { return base }
+	a.lastContact.Store(base.Add(-60 * time.Second).UnixNano())
+
+	a.checkHealth(context.Background())
+
+	got := pubs()
+	if len(got) != 2 {
+		t.Fatalf("publishes = %v, want exactly off+on", got)
+	}
+	if got[0].payload != "OFF" || got[1].payload != "ON" {
+		t.Fatalf("payload order = %q,%q, want OFF,ON", got[0].payload, got[1].payload)
+	}
+	for i, p := range got {
+		if p.topic != "hs100/velux_reset/set" {
+			t.Errorf("publish[%d] topic = %q", i, p.topic)
+		}
+		// A retained OFF would strand the plug off across a restart, leaving the
+		// gateway dead with nobody to publish the ON.
+		if p.retained {
+			t.Errorf("publish[%d] (%s) was retained, must not be", i, p.payload)
+		}
+	}
+
+	if *hbStarts == 0 {
+		t.Errorf("heartbeat was not restarted after the power cycle")
+	}
+	if reg, _, avail, _ := mgr.counts(); reg == 0 || avail == 0 {
+		t.Errorf("after power cycle: Register=%d MarkAllAvailable=%d, want both > 0", reg, avail)
+	}
+	if a.wedged.Load() {
+		t.Errorf("still wedged after a successful power cycle")
+	}
+}
+
+// TestPowerCycleDisabledKeepsManualBehaviour pins the opt-in guarantee: without
+// a topic nothing is ever published, whatever the gateway does.
+func TestPowerCycleDisabledKeepsManualBehaviour(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Restart.HealthCheckInterval = 10
+	cfg.Restart.RestartOnError = true
+
+	a, klf, _, _ := newTestApp(cfg)
+	withFastReboot(t, 1)
+
+	published := 0
+	a.publishFn = func(string, string, bool) { published++ }
+	klf.connectErr = errors.New("wedged")
+
+	base := time.Unix(2_100_000, 0)
+	a.now = func() time.Time { return base }
+	a.lastContact.Store(base.Add(-60 * time.Second).UnixNano())
+
+	a.checkHealth(context.Background())
+
+	if published != 0 {
+		t.Fatalf("published %d messages with no power-cycle topic, want 0", published)
+	}
+	if !a.wedged.Load() {
+		t.Fatalf("expected the gateway to stay wedged")
+	}
+}
+
+// TestPowerCycleDebounced asserts the minimum gap: a gateway that never returns
+// must not have its mains toggled on every health-check tick.
+func TestPowerCycleDebounced(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Restart.HealthCheckInterval = 10
+	cfg.Restart.RestartOnError = true
+
+	a, klf, _, _ := newTestApp(cfg)
+	withFastReboot(t, 1)
+	pubs := withPlug(a, "plug/set")
+
+	// Never recovers, so every tick reaches the escalation.
+	klf.connectErr = errors.New("permanently wedged")
+
+	base := time.Unix(2_200_000, 0)
+	a.now = func() time.Time { return base }
+	a.lastContact.Store(base.Add(-60 * time.Second).UnixNano())
+
+	a.checkHealth(context.Background())
+	afterFirst := len(pubs())
+	if afterFirst == 0 {
+		t.Fatalf("first wedge did not power-cycle")
+	}
+
+	// Second tick one minute later — well inside the 15 min floor.
+	a.now = func() time.Time { return base.Add(1 * time.Minute) }
+	a.checkHealth(context.Background())
+	if got := len(pubs()); got != afterFirst {
+		t.Fatalf("publishes = %d after debounced tick, want unchanged %d", got, afterFirst)
+	}
+
+	// Past the floor it may fire again.
+	a.now = func() time.Time { return base.Add(powerCycleMinGap + time.Minute) }
+	a.checkHealth(context.Background())
+	if got := len(pubs()); got <= afterFirst {
+		t.Fatalf("publishes = %d after the debounce window, want more than %d", got, afterFirst)
+	}
+}
+
+// TestPowerCycleDebouncedIsNotAFailure documents the sentinel: callers must be
+// able to tell "not yet" from "it broke".
+func TestPowerCycleDebouncedIsNotAFailure(t *testing.T) {
+	cfg := config.Config{}
+	a, _, _, _ := newTestApp(cfg)
+	withFastReboot(t, 1)
+	withPlug(a, "plug/set")
+
+	base := time.Unix(2_300_000, 0)
+	a.now = func() time.Time { return base }
+
+	if err := a.doPowerCycle(context.Background()); err != nil {
+		t.Fatalf("first power cycle: %v", err)
+	}
+	err := a.doPowerCycle(context.Background())
+	if !errors.Is(err, errPowerCycleDebounced) {
+		t.Fatalf("second power cycle error = %v, want errPowerCycleDebounced", err)
+	}
+}
+
+// TestPowerCycleSerializedWithReboot asserts the new step joins the resetMu
+// serialization, so a periodic reboot and an escalation can never drive the
+// KLF200 connection at the same time.
+func TestPowerCycleSerializedWithReboot(t *testing.T) {
+	cfg := config.Config{}
+	a, _, _, _ := newTestApp(cfg)
+	withFastReboot(t, 1)
+	withPlug(a, "plug/set")
+
+	base := time.Unix(2_400_000, 0)
+	a.now = func() time.Time { return base }
+
+	var mu sync.Mutex
+	inFlight, maxInFlight := 0, 0
+	track := func() func() {
+		mu.Lock()
+		inFlight++
+		if inFlight > maxInFlight {
+			maxInFlight = inFlight
+		}
+		mu.Unlock()
+		return func() {
+			mu.Lock()
+			inFlight--
+			mu.Unlock()
+		}
+	}
+	// Both paths funnel through stopHeartbeatFn while holding resetMu, which
+	// makes it a usable probe for "how many resets are running right now".
+	a.stopHeartbeatFn = func() {
+		done := track()
+		time.Sleep(10 * time.Millisecond)
+		done()
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _ = a.doReboot(context.Background()) }()
+	go func() { defer wg.Done(); _ = a.doPowerCycle(context.Background()) }()
+	wg.Wait()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if maxInFlight > 1 {
+		t.Fatalf("max concurrent reset paths = %d, want 1 (resetMu not held?)", maxInFlight)
+	}
+}
+
+// TestPowerCycleRestoresPowerOnCancel guards the worst outcome of all: shutting
+// down mid-cycle must never leave the gateway without power.
+func TestPowerCycleRestoresPowerOnCancel(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Restart.PowerCycleOffSeconds = 60 // long enough that cancel lands first
+
+	a, _, _, _ := newTestApp(cfg)
+	withFastReboot(t, 1)
+	pubs := withPlug(a, "plug/set")
+	a.cfg.Restart.PowerCycleOffSeconds = 60
+
+	base := time.Unix(2_500_000, 0)
+	a.now = func() time.Time { return base }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := a.doPowerCycle(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("doPowerCycle error = %v, want context.Canceled", err)
+	}
+
+	got := pubs()
+	if len(got) < 2 || got[len(got)-1].payload != "ON" {
+		t.Fatalf("publishes = %v, want the last one to restore power (ON)", got)
 	}
 }

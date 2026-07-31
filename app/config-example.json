@@ -19,7 +19,11 @@
   "restart": {
     "restart-interval": 24,
     "health-check-interval": 300,
-    "restart-on-error": true
+    "restart-on-error": true,
+    "power-cycle-topic": "",
+    "power-cycle-off-payload": "OFF",
+    "power-cycle-on-payload": "ON",
+    "power-cycle-off-seconds": 10
   },
   "loglevel": "info"
 }

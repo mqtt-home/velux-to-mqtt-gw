@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,11 @@ import (
 // interval before the gateway is considered wedged. Matches the Python bridge's
 // HEALTH_CHECK_FAILURE_THRESHOLD (2.0).
 const healthCheckFailureThreshold = 2.0
+
+// errPowerCycleDebounced is returned when a power cycle is requested inside the
+// powerCycleMinGap window. Callers treat it as "not now", not as a failure: it
+// means the previous cycle is still the most recent recovery attempt.
+var errPowerCycleDebounced = errors.New("power cycle debounced")
 
 // rebootBackoffSchedule is the wait-between-attempts schedule for reconnecting
 // to the gateway after a device reboot. Attempts are made after each duration
@@ -85,8 +91,19 @@ type App struct {
 	startHeartbeatFn func()
 	stopHeartbeatFn  func()
 
+	// publishFn is the raw MQTT publish seam, used only by the power-cycle
+	// escalation (cover state goes through the bridge manager). Set in newApp
+	// from the same MQTT wrapper the manager uses, so it is never nil in
+	// production; doPowerCycle still checks, because a nil func here would panic
+	// exactly when recovery is most needed.
+	publishFn func(topic, payload string, retained bool)
+
 	// now is the clock seam so health checks can be unit-tested without real time.
 	now func() time.Time
+
+	// lastPowerCycle is the UnixNano of the last power cycle, for the debounce
+	// floor (powerCycleMinGap). Guarded by resetMu, like the cycle itself.
+	lastPowerCycle int64
 
 	// lastContact holds the UnixNano of the most recent successful KLF200 contact
 	// (heartbeat confirmation or node update). Stamped atomically from multiple
@@ -111,7 +128,7 @@ type App struct {
 // newApp constructs an App from config, building the concrete klf200 client and
 // bridge manager. MQTT must already be connected (main calls mqtt.Start before
 // building the App) so the manager's publishes land on a live connection.
-func newApp(cfg config.Config, client *klf200.Client, mgr *bridge.Manager) *App {
+func newApp(cfg config.Config, client *klf200.Client, mgr *bridge.Manager, m *bridge.MQTT) *App {
 	a := &App{
 		cfg:    cfg,
 		client: client,
@@ -119,6 +136,9 @@ func newApp(cfg config.Config, client *klf200.Client, mgr *bridge.Manager) *App 
 		klf:    client,
 		cm:     mgr,
 		now:    time.Now,
+	}
+	if m != nil {
+		a.publishFn = m.Publish
 	}
 	a.startHeartbeatFn = a.startHeartbeat
 	a.stopHeartbeatFn = a.stopHeartbeat
@@ -346,11 +366,21 @@ func (a *App) checkHealth(ctx context.Context) {
 		return
 	}
 
-	// Wedged: no contact within the threshold.
+	// Wedged: no contact within the threshold. What we tell the operator depends
+	// on whether we can actually do something about it (a configured plug) or
+	// whether it takes a human walking to the gateway.
+	autoRecover := a.cfg.Restart.PowerCycleEnabled() && a.cfg.Restart.RestartOnError
 	if a.wedged.CompareAndSwap(false, true) {
-		logger.Error("KLF200 unreachable - manual power-cycle required",
-			"since_contact", sinceContact, "threshold", threshold)
+		if autoRecover {
+			logger.Error("KLF200 unreachable - will escalate to power cycle if soft recovery fails",
+				"since_contact", sinceContact, "threshold", threshold)
+		} else {
+			logger.Error("KLF200 unreachable - manual power-cycle required",
+				"since_contact", sinceContact, "threshold", threshold)
+		}
 		a.cm.MarkAllUnavailable()
+	} else if autoRecover {
+		logger.Warn("KLF200 still unreachable", "since_contact", sinceContact)
 	} else {
 		logger.Warn("KLF200 still unreachable - waiting for manual power-cycle",
 			"since_contact", sinceContact)
@@ -365,6 +395,9 @@ func (a *App) checkHealth(ctx context.Context) {
 	logger.Info("Attempting KLF200 reconnect after wedge")
 	if err := a.doReconnect(ctx); err != nil {
 		logger.Warn("KLF200 reconnect attempt failed", "error", err)
+		// The gateway would not even take a fresh session. This is the freeze the
+		// soft reboot cannot clear, so escalate to mains if a plug is configured.
+		a.escalateToPowerCycle(ctx, "reconnect failed")
 		return
 	}
 
@@ -374,11 +407,45 @@ func (a *App) checkHealth(ctx context.Context) {
 	logger.Info("KLF200 reconnected, rebooting to clear zombie session slots")
 	if err := a.doReboot(ctx); err != nil {
 		logger.Warn("KLF200 post-recovery reboot failed", "error", err)
+		a.escalateToPowerCycle(ctx, "soft reboot failed")
 		return
 	}
 
 	if a.wedged.CompareAndSwap(true, false) {
 		logger.Info("KLF200 recovered after wedge")
+		a.cm.MarkAllAvailable()
+	}
+}
+
+// escalateToPowerCycle is the bridge between the wedge path and doPowerCycle. It
+// keeps checkHealth readable: gate on the feature, run the cycle, and translate
+// the outcome into one log line each. On success the wedged flag is cleared here
+// rather than waiting for the next healthy tick, so availability comes back
+// immediately after a recovery that took minutes.
+//
+// reason is what the soft path failed at, so the log says why mains was cut.
+func (a *App) escalateToPowerCycle(ctx context.Context, reason string) {
+	if !a.cfg.Restart.PowerCycleEnabled() {
+		// Nothing configured: the operator has to do it by hand, which the wedge
+		// log already said.
+		return
+	}
+
+	if err := a.doPowerCycle(ctx); err != nil {
+		switch {
+		case errors.Is(err, errPowerCycleDebounced):
+			logger.Warn("KLF200 still unreachable - power cycle debounced, waiting",
+				"reason", reason, "error", err)
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			logger.Info("KLF200 power cycle aborted by shutdown", "reason", reason)
+		default:
+			logger.Error("KLF200 power cycle failed", "reason", reason, "error", err)
+		}
+		return
+	}
+
+	if a.wedged.CompareAndSwap(true, false) {
+		logger.Info("KLF200 recovered after power cycle", "reason", reason)
 		a.cm.MarkAllAvailable()
 	}
 }
@@ -482,6 +549,108 @@ func (a *App) doReboot(ctx context.Context) error {
 	}
 
 	return fmt.Errorf("KLF200 post-reboot reconnect exhausted %d attempts: %w",
+		len(rebootBackoffSchedule), lastErr)
+}
+
+// powerCycleMinGap is the debounce floor between two power cycles. A gateway
+// that never comes back must not have its mains toggled on every health-check
+// tick: that wears the plug relay and the KLF200, and it cannot help — if a
+// cycle did not fix it, an immediate second one will not either. Deliberately a
+// fixed floor rather than derived from restart-interval, so shortening the
+// health-check interval cannot turn into rapid power cycling.
+const powerCycleMinGap = 15 * time.Minute
+
+// doPowerCycle physically restarts the KLF200 by publishing off/on to the
+// configured smart-plug topic, then re-runs the full bring-up. This is the last
+// resort in the wedge-recovery escalation: the gateway's network subsystem can
+// freeze in a state that GW_REBOOT_REQ does not clear (the device re-accepts TCP
+// within ~2s — far too fast for a real boot — while the covers stay dead), and
+// only cutting mains recovers it.
+//
+// Serialized via resetMu like doReconnect/doReboot, so it never races them on
+// the KLF200 connection. Debounced by powerCycleMinGap: a caller that arrives
+// too early gets errPowerCycleDebounced and should fall back to waiting.
+//
+// The publishes are deliberately NOT retained: a retained OFF would strand the
+// plug powered off across a broker or bridge restart, leaving the gateway dead
+// with nobody publishing the ON that would revive it.
+func (a *App) doPowerCycle(ctx context.Context) error {
+	a.resetMu.Lock()
+	defer a.resetMu.Unlock()
+
+	if a.publishFn == nil {
+		return errors.New("power cycle: no MQTT publish wiring")
+	}
+
+	rc := a.cfg.Restart
+	if !rc.PowerCycleEnabled() {
+		return errors.New("power cycle: no topic configured")
+	}
+
+	now := a.now()
+	if a.lastPowerCycle != 0 {
+		if since := now.Sub(time.Unix(0, a.lastPowerCycle)); since < powerCycleMinGap {
+			return fmt.Errorf("%w: last cycle %s ago, floor %s",
+				errPowerCycleDebounced, since.Round(time.Second), powerCycleMinGap)
+		}
+	}
+	a.lastPowerCycle = now.UnixNano()
+
+	// Pause the heartbeat so its pulses do not race the outage.
+	a.stopHeartbeatFn()
+
+	dwell := time.Duration(rc.PowerCycleOffSeconds) * time.Second
+	logger.Warn("KLF200 wedged - power-cycling via smart plug",
+		"topic", rc.PowerCycleTopic, "off_payload", rc.PowerCycleOffPayload,
+		"on_payload", rc.PowerCycleOnPayload, "dwell", dwell)
+
+	a.publishFn(rc.PowerCycleTopic, rc.PowerCycleOffPayload, false)
+
+	// Drop our local session state while the gateway is dark, so the reconnect
+	// below starts from a clean slate (same reasoning as in doReboot).
+	if err := a.klf.Disconnect(); err != nil {
+		logger.Debug("KLF200 disconnect before power cycle returned error (expected)", "error", err)
+	}
+
+	select {
+	case <-time.After(dwell):
+	case <-ctx.Done():
+		// Never leave the gateway without power because we are shutting down:
+		// restore it on the way out, then report the cancellation.
+		a.publishFn(rc.PowerCycleTopic, rc.PowerCycleOnPayload, false)
+		return ctx.Err()
+	}
+
+	a.publishFn(rc.PowerCycleTopic, rc.PowerCycleOnPayload, false)
+	logger.Info("KLF200 power restored, waiting for boot")
+
+	// Same backoff budget as a soft reboot; a cold boot is not slower than the
+	// gateway's own restart.
+	var lastErr error
+	for i, wait := range rebootBackoffSchedule {
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
+		if err := a.connectAndLoad(ctx); err != nil {
+			lastErr = err
+			logger.Info("KLF200 post-power-cycle reconnect attempt failed",
+				"attempt", i+1, "of", len(rebootBackoffSchedule), "error", err)
+			_ = a.klf.Disconnect()
+			continue
+		}
+
+		if err := a.cm.Register(ctx); err != nil {
+			return fmt.Errorf("post-power-cycle register: %w", err)
+		}
+		a.startHeartbeatFn()
+		logger.Info("KLF200 power cycle complete, reconnected", "attempt", i+1)
+		return nil
+	}
+
+	return fmt.Errorf("KLF200 post-power-cycle reconnect exhausted %d attempts: %w",
 		len(rebootBackoffSchedule), lastErr)
 }
 

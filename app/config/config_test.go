@@ -404,3 +404,62 @@ func TestToGatewayConfig(t *testing.T) {
 		t.Errorf("QoS = %d", gw.QoS)
 	}
 }
+
+// TestApplyDefaults_PowerCycle pins the power-cycle defaults. Payload and dwell
+// defaults apply even when the feature is off, so enabling it later only needs
+// the topic.
+func TestApplyDefaults_PowerCycle(t *testing.T) {
+	c := Config{}
+	ApplyDefaults(&c)
+
+	if c.Restart.PowerCycleTopic != "" {
+		t.Errorf("PowerCycleTopic = %q, want empty (feature must be opt-in)", c.Restart.PowerCycleTopic)
+	}
+	if c.Restart.PowerCycleOffPayload != "OFF" {
+		t.Errorf("PowerCycleOffPayload = %q, want OFF", c.Restart.PowerCycleOffPayload)
+	}
+	if c.Restart.PowerCycleOnPayload != "ON" {
+		t.Errorf("PowerCycleOnPayload = %q, want ON", c.Restart.PowerCycleOnPayload)
+	}
+	if c.Restart.PowerCycleOffSeconds != 10 {
+		t.Errorf("PowerCycleOffSeconds = %d, want 10", c.Restart.PowerCycleOffSeconds)
+	}
+}
+
+// TestApplyDefaults_PowerCycleKeepsExplicit makes sure a deliberately short or
+// long dwell survives ApplyDefaults.
+func TestApplyDefaults_PowerCycleKeepsExplicit(t *testing.T) {
+	c := Config{}
+	c.Restart.PowerCycleTopic = "cmnd/velux-plug/POWER"
+	c.Restart.PowerCycleOffPayload = "0"
+	c.Restart.PowerCycleOnPayload = "1"
+	c.Restart.PowerCycleOffSeconds = 30
+	ApplyDefaults(&c)
+
+	if c.Restart.PowerCycleOffPayload != "0" || c.Restart.PowerCycleOnPayload != "1" {
+		t.Errorf("payloads overwritten: %q/%q", c.Restart.PowerCycleOffPayload, c.Restart.PowerCycleOnPayload)
+	}
+	if c.Restart.PowerCycleOffSeconds != 30 {
+		t.Errorf("PowerCycleOffSeconds = %d, want 30", c.Restart.PowerCycleOffSeconds)
+	}
+}
+
+// TestPowerCycleEnabled is the feature gate: the topic alone decides.
+func TestPowerCycleEnabled(t *testing.T) {
+	tests := []struct {
+		name  string
+		topic string
+		want  bool
+	}{
+		{"unset", "", false},
+		{"set", "hs100/velux_reset/set", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := RestartConfig{PowerCycleTopic: tt.topic}
+			if got := r.PowerCycleEnabled(); got != tt.want {
+				t.Errorf("PowerCycleEnabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

@@ -75,7 +75,7 @@ func main() {
 	client := klf200.NewClient(cfg.Velux.Host, cfg.Velux.Password)
 	mqttWrapper := bridge.NewMQTT(cfg)
 	mgr := bridge.NewManager(cfg, client, mqttWrapper)
-	app := newApp(cfg, client, mgr)
+	app := newApp(cfg, client, mgr, mqttWrapper)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

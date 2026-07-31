@@ -51,7 +51,11 @@ See [`app/config-example.json`](app/config-example.json) for a ready-to-copy tem
   "restart": {
     "restart-interval": 24,
     "health-check-interval": 300,
-    "restart-on-error": true
+    "restart-on-error": true,
+    "power-cycle-topic": "",
+    "power-cycle-off-payload": "OFF",
+    "power-cycle-on-payload": "ON",
+    "power-cycle-off-seconds": 10
   },
   "loglevel": "info"
 }
@@ -92,6 +96,45 @@ See [`app/config-example.json`](app/config-example.json) for a ready-to-copy tem
 | `restart-interval` | integer | `24` | Reboot the KLF200 device (via `GW_REBOOT_REQ`) every N hours; frees both API session slots. `0` disables the periodic reboot (the startup reboot still runs) |
 | `health-check-interval` | integer | `300` | Send a KLF200 heartbeat every N seconds (0 = disabled) |
 | `restart-on-error` | bool | `true` | On a wedge (no KLF200 contact within `health-check-interval × 2`), reconnect and then reboot the gateway to clear any zombie session slot |
+| `power-cycle-topic` | string | `""` | MQTT topic of a smart plug powering the KLF200. **Empty disables the whole power-cycle feature.** |
+| `power-cycle-off-payload` | string | `"OFF"` | Payload published to cut power |
+| `power-cycle-on-payload` | string | `"ON"` | Payload published to restore power |
+| `power-cycle-off-seconds` | integer | `10` | Dwell with power removed, long enough for the gateway's capacitors to drain |
+
+> **Automatic power-cycle recovery (optional).** The KLF200's most common failure
+> mode is a network-subsystem freeze after roughly a day of an open connection:
+> TLS handshakes stop completing and the gateway accepts no new sessions. A soft
+> `GW_REBOOT_REQ` does **not** clear it — the device re-accepts TCP within ~2 s,
+> far too fast for a genuine boot, while the covers stay dead. Only cutting mains
+> recovers it.
+>
+> If the gateway is wired through an MQTT-controllable plug, set
+> `power-cycle-topic` and the bridge will do it by itself: as the **last** step of
+> wedge recovery (after a failed reconnect or failed soft reboot) it publishes the
+> off payload, waits `power-cycle-off-seconds`, publishes the on payload, then
+> re-runs the full connect → authenticate → load → register → heartbeat sequence
+> using the same backoff schedule as a soft reboot. Without the topic, behaviour
+> is exactly as before: the wedge is logged as `manual power-cycle required`.
+>
+> Two safeguards worth knowing: the publishes are **never retained** (a retained
+> OFF would strand the plug off across a broker restart, leaving the gateway dead
+> with nobody to publish the ON), and repeat cycles are **debounced to 15 min**
+> so a gateway that never returns does not get its mains toggled on every
+> health-check tick. Cancelling the process mid-cycle restores power on the way
+> out.
+>
+> Per-plug examples:
+>
+> | Plug | `power-cycle-topic` | off / on |
+> |---|---|---|
+> | [hs100-to-mqtt-gw](https://github.com/mqtt-home/hs100-to-mqtt-gw) | `hs100/<name>/set` | `OFF` / `ON` |
+> | Tasmota | `cmnd/<device>/POWER` | `OFF` / `ON` |
+> | Shelly Gen1 | `shellies/<id>/relay/0/command` | `off` / `on` |
+> | Shelly Gen2 | `shellies/<id>/command/switch:0` | `off` / `on` |
+> | zigbee2mqtt | `zigbee2mqtt/<name>/set` | `{"state":"OFF"}` / `{"state":"ON"}` |
+>
+> Do not point this at the plug's **state** topic — it must be the command topic,
+> or the bridge will publish into a topic the plug only reads back.
 
 > **Startup and reboot timing.** The bridge always reboots the KLF200 once
 > during startup to clear any zombie session slots left by a previous unclean
@@ -297,7 +340,11 @@ verbose = false
   "restart": {
     "restart-interval": 24,
     "health-check-interval": 300,
-    "restart-on-error": true
+    "restart-on-error": true,
+    "power-cycle-topic": "",
+    "power-cycle-off-payload": "OFF",
+    "power-cycle-on-payload": "ON",
+    "power-cycle-off-seconds": 10
   },
   "loglevel": "info"
 }
