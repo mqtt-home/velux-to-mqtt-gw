@@ -342,7 +342,65 @@ func (a *App) startHealthCheck() {
 // startRebootLoop launches the periodic device-reboot loop. Disabled when the
 // interval is 0. Each tick sends GW_REBOOT_REQ and reconnects with backoff,
 // freeing both KLF200 session slots (ours and any zombie).
+// nextRestartTime returns the next occurrence of hour:minute at or after now, in
+// now's location. If today's slot has passed, it moves to tomorrow.
+//
+// time.Date normalises impossible local times, which is what makes this survive
+// DST: on the spring-forward night 02:00 does not exist and the call yields
+// 03:00 (the restart happens an hour "late" once), and on the autumn night the
+// earlier of the two 02:00s is used. Both are acceptable for maintenance; what
+// matters is that it never silently skips a day or fires twice.
+func nextRestartTime(now time.Time, hour, minute int) time.Time {
+	next := time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location())
+	if !next.After(now) {
+		next = time.Date(now.Year(), now.Month(), now.Day()+1, hour, minute, 0, 0, now.Location())
+	}
+	return next
+}
+
+// startScheduledRestartLoop runs the periodic restart at a wall-clock time of day
+// instead of an interval from process start. Operators want maintenance at a
+// known quiet hour; an interval ticker drifts with every redeploy, so "every 24h"
+// silently becomes "whenever the pod last restarted".
+func (a *App) startScheduledRestartLoop(hour, minute int) {
+	kind := "soft: GW_REBOOT_REQ"
+	if a.cfg.Restart.PeriodicPowerCycleEnabled() {
+		kind = "hard: mains power cycle"
+	}
+	first := nextRestartTime(a.now(), hour, minute)
+	logger.Info("Scheduled restart enabled", "at", a.cfg.Restart.RestartAt, "kind", kind,
+		"next", first.Format(time.RFC3339))
+
+	a.loopsWG.Add(1)
+	go func() {
+		defer a.loopsWG.Done()
+		for {
+			// Recomputed every iteration rather than adding 24h: that keeps the
+			// slot correct across DST shifts and after a long pause.
+			next := nextRestartTime(a.now(), hour, minute)
+			wait := next.Sub(a.now())
+			timer := time.NewTimer(wait)
+			select {
+			case <-a.stopCh:
+				timer.Stop()
+				return
+			case <-timer.C:
+				a.runPeriodicRestart(context.Background())
+				// No same-slot guard needed: the recomputation at the top of the
+				// loop compares with "at or before now" and therefore always lands
+				// on tomorrow's slot, even if the restart returned within the same
+				// second it started.
+			}
+		}
+	}()
+}
+
 func (a *App) startRebootLoop() {
+	if hour, minute, err := a.cfg.Restart.RestartTimeOfDay(); err == nil && a.cfg.Restart.RestartScheduled() {
+		a.startScheduledRestartLoop(hour, minute)
+		return
+	}
+
 	interval := time.Duration(a.cfg.Restart.RestartInterval) * time.Hour
 	if interval <= 0 {
 		logger.Info("Periodic reboot disabled")

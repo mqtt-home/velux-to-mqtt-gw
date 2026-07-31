@@ -51,6 +51,7 @@ See [`app/config-example.json`](app/config-example.json) for a ready-to-copy tem
   },
   "restart": {
     "restart-interval": 24,
+    "restart-at": "",
     "health-check-interval": 300,
     "restart-on-error": true,
     "power-cycle-topic": "",
@@ -104,7 +105,8 @@ See [`app/config-example.json`](app/config-example.json) for a ready-to-copy tem
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `restart-interval` | integer | `24` | Reboot the KLF200 device (via `GW_REBOOT_REQ`) every N hours; frees both API session slots. `0` disables the periodic reboot (the startup reboot still runs) |
+| `restart-interval` | integer | `24` | Reboot the KLF200 device (via `GW_REBOOT_REQ`) every N hours; frees both API session slots. `0` disables the periodic reboot (the startup reboot still runs). Ignored when `restart-at` is set |
+| `restart-at` | string | `""` | Run the periodic restart at a wall-clock time of day, `"HH:MM"` in 24h form and **local** time (set `TZ`), e.g. `"02:00"`. Replaces `restart-interval` as the trigger. A malformed value is rejected at startup |
 | `health-check-interval` | integer | `300` | Send a KLF200 heartbeat every N seconds (0 = disabled) |
 | `restart-on-error` | bool | `true` | On a wedge (no KLF200 contact within `health-check-interval × 2`), reconnect and then reboot the gateway to clear any zombie session slot |
 | `power-cycle-topic` | string | `""` | MQTT topic of a smart plug powering the KLF200. **Empty disables the whole power-cycle feature.** |
@@ -171,6 +173,14 @@ See [`app/config-example.json`](app/config-example.json) for a ready-to-copy tem
 > themselves once commanded, so de-powering the *gateway* mid-travel costs
 > position feedback, not the movement.
 
+> **Interval or time of day?** `restart-interval` counts from process start, so
+> every redeploy moves the maintenance window — "every 24 h" quietly becomes
+> "whenever the container last restarted", which on a busy day can mean the middle
+> of the afternoon. `restart-at: "02:00"` pins it to a quiet hour instead. The next
+> slot is recomputed after every run, so it survives DST: on the spring-forward
+> night 02:00 does not exist and the restart lands at 03:00 once, on the
+> fall-back night the earlier 02:00 is used — never skipped, never twice.
+>
 > **Startup and reboot timing.** The bridge always reboots the KLF200 once
 > during startup to clear any zombie session slots left by a previous unclean
 > shutdown. This adds ~60–90 s to the initial bring-up. Container
@@ -375,6 +385,7 @@ verbose = false
   },
   "restart": {
     "restart-interval": 24,
+    "restart-at": "",
     "health-check-interval": 300,
     "restart-on-error": true,
     "power-cycle-topic": "",

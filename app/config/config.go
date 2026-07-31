@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/philipparndt/go-logger"
 	gwconfig "github.com/philipparndt/mqtt-gateway/config"
@@ -84,7 +85,15 @@ type RestartConfig struct {
 	// gateway's capacitors to drain, or the freeze can survive the cycle.
 	// Default 10.
 	PowerCycleOffSeconds int `json:"power-cycle-off-seconds"`
-	// PeriodicPowerCycle makes the RestartInterval loop cut mains instead of
+	// RestartAt schedules the periodic restart at a wall-clock time of day in
+	// "HH:MM" (24h, local time — set TZ in the container). When set it replaces
+	// RestartInterval as the trigger: maintenance lands at a predictable hour
+	// instead of drifting with every process start.
+	//
+	// Empty means keep the interval behaviour. An unparseable value is refused at
+	// load time rather than silently ignored.
+	RestartAt string `json:"restart-at"`
+	// PeriodicPowerCycle makes the periodic restart cut mains instead of
 	// sending GW_REBOOT_REQ. Off by default; requires PowerCycleTopic.
 	//
 	// Use it when the soft reboot demonstrably does not clear the freeze on your
@@ -223,7 +232,38 @@ func validate(c *Config) error {
 	if c.Velux.Password == "" {
 		return errors.New("required field missing: velux.password")
 	}
+	// Fail on a malformed schedule at startup. The alternative — ignoring it —
+	// would mean the maintenance restart silently never runs, and nobody notices
+	// until the gateway freezes weeks later.
+	if _, _, err := c.Restart.RestartTimeOfDay(); err != nil {
+		return err
+	}
 	return nil
+}
+
+// RestartTimeOfDay parses RestartAt into hour and minute. ok is false when no
+// schedule is configured (the interval behaviour applies); err is non-nil only
+// when a value is set but unusable.
+func (r RestartConfig) RestartTimeOfDay() (hour, minute int, err error) {
+	if r.RestartAt == "" {
+		return 0, 0, nil
+	}
+	t, err := time.Parse("15:04", r.RestartAt)
+	if err != nil {
+		return 0, 0, fmt.Errorf("restart.restart-at %q: want HH:MM in 24h form, e.g. \"02:00\"", r.RestartAt)
+	}
+	return t.Hour(), t.Minute(), nil
+}
+
+// RestartScheduled reports whether a wall-clock schedule is configured. Callers
+// use it to pick between the scheduled and the interval loop; validation has
+// already rejected an unparseable value by the time this runs.
+func (r RestartConfig) RestartScheduled() bool {
+	if r.RestartAt == "" {
+		return false
+	}
+	_, _, err := r.RestartTimeOfDay()
+	return err == nil
 }
 
 // Get returns the currently loaded config (zero value if none loaded yet).

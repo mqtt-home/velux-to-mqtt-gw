@@ -19,6 +19,7 @@
   },
   "restart": {
     "restart-interval": 24,
+    "restart-at": "",
     "health-check-interval": 300,
     "restart-on-error": true,
     "power-cycle-topic": "",

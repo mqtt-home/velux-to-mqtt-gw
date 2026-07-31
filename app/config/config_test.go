@@ -487,3 +487,35 @@ func TestPeriodicPowerCycleEnabled(t *testing.T) {
 		})
 	}
 }
+
+// TestRestartTimeOfDay covers parsing and the reason validation exists: a typo in
+// the schedule must fail at startup, not silently disable maintenance.
+func TestRestartTimeOfDay(t *testing.T) {
+	tests := []struct {
+		name    string
+		at      string
+		wantH   int
+		wantM   int
+		wantErr bool
+	}{
+		{"unset", "", 0, 0, false},
+		{"midnight", "00:00", 0, 0, false},
+		{"two am", "02:00", 2, 0, false},
+		{"half past", "23:30", 23, 30, false},
+		{"12h form rejected", "2:00 AM", 0, 0, true},
+		{"nonsense", "nachts", 0, 0, true},
+		{"out of range", "25:00", 0, 0, true},
+		{"seconds not accepted", "02:00:00", 0, 0, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, m, err := RestartConfig{RestartAt: tt.at}.RestartTimeOfDay()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if err == nil && (h != tt.wantH || m != tt.wantM) {
+				t.Errorf("= %d:%02d, want %d:%02d", h, m, tt.wantH, tt.wantM)
+			}
+		})
+	}
+}

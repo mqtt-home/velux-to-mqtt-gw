@@ -922,3 +922,105 @@ func TestStartWithoutPlugStillFails(t *testing.T) {
 		t.Fatal("Start returned nil with a frozen gateway and no plug configured")
 	}
 }
+
+// ─── wall-clock restart schedule ─────────────────────────────────────────────
+
+// TestNextRestartTime covers the slot arithmetic, including both DST nights in
+// Europe/Berlin — maintenance must never silently skip a day or fire twice.
+func TestNextRestartTime(t *testing.T) {
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+
+	tests := []struct {
+		name      string
+		now       time.Time
+		hour, min int
+		wantHour  int
+		wantDay   int
+		wantMonth time.Month
+	}{
+		{
+			name: "later today",
+			now:  time.Date(2026, 8, 1, 0, 30, 0, 0, berlin),
+			hour: 2, min: 0, wantHour: 2, wantDay: 1, wantMonth: time.August,
+		},
+		{
+			name: "already past - tomorrow",
+			now:  time.Date(2026, 8, 1, 9, 0, 0, 0, berlin),
+			hour: 2, min: 0, wantHour: 2, wantDay: 2, wantMonth: time.August,
+		},
+		{
+			name: "exactly now counts as past",
+			now:  time.Date(2026, 8, 1, 2, 0, 0, 0, berlin),
+			hour: 2, min: 0, wantHour: 2, wantDay: 2, wantMonth: time.August,
+		},
+		{
+			// Spring forward: 2026-03-29, 02:00 does not exist in Berlin
+			// (02:00 -> 03:00). time.Date normalises to 03:00, so the restart runs
+			// an hour late that one night instead of being skipped.
+			name: "spring-forward night",
+			now:  time.Date(2026, 3, 29, 1, 0, 0, 0, berlin),
+			hour: 2, min: 0, wantHour: 3, wantDay: 29, wantMonth: time.March,
+		},
+		{
+			// Fall back: 2026-10-25 has 02:00 twice; the earlier one is used and the
+			// slot still occurs exactly once.
+			name: "fall-back night",
+			now:  time.Date(2026, 10, 25, 0, 30, 0, 0, berlin),
+			hour: 2, min: 0, wantHour: 2, wantDay: 25, wantMonth: time.October,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := nextRestartTime(tt.now, tt.hour, tt.min)
+			if !got.After(tt.now) {
+				t.Fatalf("next = %s is not after now = %s", got, tt.now)
+			}
+			if got.Hour() != tt.wantHour || got.Day() != tt.wantDay || got.Month() != tt.wantMonth {
+				t.Errorf("next = %s, want %s %d at %02d:%02d", got, tt.wantMonth, tt.wantDay, tt.wantHour, tt.min)
+			}
+		})
+	}
+}
+
+// TestNextRestartTimeAlwaysAdvances is the property that matters most: whatever
+// the input, the next slot is strictly in the future and at most ~25h away (the
+// upper bound allows for the DST shift).
+func TestNextRestartTimeAlwaysAdvances(t *testing.T) {
+	berlin, err := time.LoadLocation("Europe/Berlin")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	start := time.Date(2026, 1, 1, 0, 0, 0, 0, berlin)
+	for i := 0; i < 400; i++ {
+		now := start.AddDate(0, 0, i).Add(time.Duration(i) * 37 * time.Minute)
+		next := nextRestartTime(now, 2, 0)
+		if !next.After(now) {
+			t.Fatalf("now=%s next=%s not advancing", now, next)
+		}
+		if d := next.Sub(now); d > 25*time.Hour {
+			t.Fatalf("now=%s next=%s gap %s too large", now, next, d)
+		}
+	}
+}
+
+// TestRestartScheduleSelection: a configured time wins over the interval, and an
+// empty one keeps the old behaviour.
+func TestRestartScheduleSelection(t *testing.T) {
+	scheduled := config.RestartConfig{RestartAt: "02:00", RestartInterval: 24}
+	if !scheduled.RestartScheduled() {
+		t.Error("RestartScheduled() = false for 02:00")
+	}
+	h, m, err := scheduled.RestartTimeOfDay()
+	if err != nil || h != 2 || m != 0 {
+		t.Errorf("RestartTimeOfDay() = %d:%02d, %v; want 2:00, nil", h, m, err)
+	}
+
+	interval := config.RestartConfig{RestartInterval: 24}
+	if interval.RestartScheduled() {
+		t.Error("RestartScheduled() = true with no restart-at")
+	}
+}
