@@ -38,6 +38,16 @@ func (m MQTTConfig) ToGatewayConfig() gwconfig.MQTTConfig {
 type VeluxConfig struct {
 	Host     string `json:"host"`
 	Password string `json:"password"`
+	// ConnectTimeoutSeconds bounds one full bring-up attempt: TLS dial +
+	// handshake + GW_PASSWORD_ENTER + node load. Default 45.
+	//
+	// This must exist because the gateway's freeze mode accepts the TCP
+	// connection and then never completes the TLS handshake. Without a deadline
+	// the dial simply blocks forever: the process neither fails nor exits, so no
+	// supervisor restarts it and no recovery path is ever reached. Observed in
+	// the field — a bridge sat in "Connecting to KLF200" for minutes with zero
+	// restarts while the covers were dead.
+	ConnectTimeoutSeconds int `json:"connect-timeout-seconds"`
 }
 
 // HomeAssistantConfig holds Home Assistant integration settings.
@@ -126,6 +136,9 @@ func ApplyDefaults(c *Config) {
 	}
 	if c.Restart.HealthCheckInterval == 0 {
 		c.Restart.HealthCheckInterval = 300
+	}
+	if c.Velux.ConnectTimeoutSeconds == 0 {
+		c.Velux.ConnectTimeoutSeconds = 45
 	}
 	// Power-cycle payload/dwell defaults apply whether or not the feature is
 	// enabled, so a config that only sets the topic is complete.

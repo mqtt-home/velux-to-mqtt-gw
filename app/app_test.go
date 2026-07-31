@@ -23,11 +23,15 @@ type fakeKLF struct {
 	// connectErr until it hits zero (models a gateway that takes N attempts to
 	// come back after a reboot).
 	connectErrsUntil int
-	rebootErr        error
-	disconnected     int
-	connected        int
-	loaded           int
-	rebooted         int
+	// connectBlocks models the gateway's freeze: the TCP connection is accepted
+	// but the handshake never completes, so Connect only returns when its context
+	// is done.
+	connectBlocks bool
+	rebootErr     error
+	disconnected  int
+	connected     int
+	loaded        int
+	rebooted      int
 }
 
 func (f *fakeKLF) record(s string) {
@@ -36,8 +40,15 @@ func (f *fakeKLF) record(s string) {
 	f.mu.Unlock()
 }
 
-func (f *fakeKLF) Connect(_ context.Context) error {
+func (f *fakeKLF) Connect(ctx context.Context) error {
 	f.record("connect")
+	f.mu.Lock()
+	blocks := f.connectBlocks
+	f.mu.Unlock()
+	if blocks {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	f.mu.Lock()
 	var err error
 	if f.connectErrsUntil > 0 {
@@ -816,5 +827,98 @@ func TestPeriodicPowerCycleSkippedWhenDebounced(t *testing.T) {
 	if klf.rebooted != rebootsBefore {
 		t.Errorf("soft reboot ran %d times after a debounced hard restart, want none",
 			klf.rebooted-rebootsBefore)
+	}
+}
+
+// ─── bring-up deadline + startup escalation ──────────────────────────────────
+
+// TestConnectAndLoadHonoursTimeout is the regression test for the failure that
+// hurt most in the field: the gateway accepted TCP and then left the TLS
+// handshake hanging, and because the bring-up context had no deadline the process
+// blocked forever — no error, no exit, no restart, covers dead.
+func TestConnectAndLoadHonoursTimeout(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Velux.ConnectTimeoutSeconds = 1
+
+	a, klf, _, _ := newTestApp(cfg)
+	// Model the freeze: Connect blocks until its context is done.
+	klf.connectBlocks = true
+
+	start := time.Now()
+	err := a.connectAndLoad(context.Background())
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("connectAndLoad returned nil on a hanging connect, want a deadline error")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("took %s, want it bounded by the 1s timeout", elapsed)
+	}
+}
+
+// TestConnectAndLoadWithoutTimeoutConfigured: 0 means "no deadline", so an
+// operator can opt out without the code inventing one.
+func TestConnectAndLoadWithoutTimeoutConfigured(t *testing.T) {
+	cfg := config.Config{} // ConnectTimeoutSeconds == 0
+	a, _, _, _ := newTestApp(cfg)
+
+	if err := a.connectAndLoad(context.Background()); err != nil {
+		t.Fatalf("connectAndLoad: %v", err)
+	}
+}
+
+// TestStartEscalatesToPowerCycleWhenBringUpFails covers the gap that made the
+// whole feature useless in the worst case: if the gateway is already frozen when
+// the bridge starts, the health-check and periodic loops do not exist yet, so the
+// escalation has to happen inside Start or the bridge never comes up.
+func TestStartEscalatesToPowerCycleWhenBringUpFails(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Restart.RestartInterval = 24
+	cfg.Restart.HealthCheckInterval = 300
+
+	a, klf, mgr, hbStarts := newTestApp(cfg)
+	withFastReboot(t, 2)
+	pubs := withPlug(a, "hs100/velux_reset/set")
+	a.now = func() time.Time { return time.Unix(4_000_000, 0) }
+
+	// First bring-up attempt fails (frozen gateway), the one after the power
+	// cycle succeeds.
+	klf.connectErrsUntil = 1
+
+	if err := a.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(a.Stop)
+
+	got := pubs()
+	if len(got) != 2 || got[0].payload != "OFF" || got[1].payload != "ON" {
+		t.Fatalf("publishes = %v, want OFF then ON", got)
+	}
+	if reg, _, _, _ := mgr.counts(); reg == 0 {
+		t.Error("covers were never registered after the recovery")
+	}
+	if *hbStarts == 0 {
+		t.Error("heartbeat never started after the recovery")
+	}
+	// A mains cycle is the harder restart; a soft reboot straight after would
+	// only cost another minute of bring-up.
+	if klf.rebooted != 0 {
+		t.Errorf("startup soft reboot ran %d times after a power cycle, want 0", klf.rebooted)
+	}
+}
+
+// TestStartWithoutPlugStillFails: no plug, no magic — Start must report the
+// failure so the supervisor can restart the process, exactly as before.
+func TestStartWithoutPlugStillFails(t *testing.T) {
+	cfg := config.Config{}
+	a, klf, _, _ := newTestApp(cfg)
+	withFastReboot(t, 1)
+	klf.connectErr = errors.New("frozen gateway")
+
+	if err := a.Start(context.Background()); err == nil {
+		t.Fatal("Start returned nil with a frozen gateway and no plug configured")
 	}
 }

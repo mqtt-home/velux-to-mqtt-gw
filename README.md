@@ -42,7 +42,8 @@ See [`app/config-example.json`](app/config-example.json) for a ready-to-copy tem
   },
   "velux": {
     "host": "192.168.1.50",
-    "password": "velux123"
+    "password": "velux123",
+    "connect-timeout-seconds": 45
   },
   "homeassistant": {
     "prefix": "",
@@ -82,6 +83,15 @@ See [`app/config-example.json`](app/config-example.json) for a ready-to-copy tem
 |-------|------|-------------|
 | `host` | string | IP address of the KLF200 gateway |
 | `password` | string | KLF200 WiFi/API password |
+| `connect-timeout-seconds` | integer | Deadline for one bring-up attempt (TLS dial + handshake + password + node load). Default `45`; `0` disables it |
+
+> **Why the bring-up needs a deadline.** The gateway's freeze mode accepts the TCP
+> connection and then never finishes the TLS handshake. With no deadline the dial
+> blocks forever: the process neither fails nor exits, so nothing restarts it and
+> no recovery path is reached — a bridge was observed sitting in
+> `Connecting to KLF200` for minutes with zero restarts while the covers were
+> dead. With the timeout the attempt fails, which is what lets the power-cycle
+> escalation (or the supervisor) act.
 
 #### `homeassistant` (optional)
 
@@ -150,6 +160,12 @@ See [`app/config-example.json`](app/config-example.json) for a ready-to-copy tem
 > Behaviour details: a scheduled cycle that fails falls back to the soft reboot
 > (better than skipping maintenance), and one that lands within 15 minutes of a
 > wedge-triggered cycle is skipped rather than repeated. Both are logged.
+>
+> The escalation also runs **during startup**: if the very first bring-up fails
+> and a plug is configured, the bridge power-cycles the gateway and retries once
+> before giving up. Without that, a gateway that was already frozen when the
+> bridge started could never be recovered by the bridge itself — the health-check
+> and periodic loops only start after a successful bring-up.
 >
 > This is safe for covers in motion: io-homecontrol actuators execute a movement
 > themselves once commanded, so de-powering the *gateway* mid-travel costs
@@ -350,7 +366,8 @@ verbose = false
   },
   "velux": {
     "host": "192.168.1.50",
-    "password": "velux123"
+    "password": "velux123",
+    "connect-timeout-seconds": 45
   },
   "homeassistant": {
     "prefix": "DEV-",

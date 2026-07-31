@@ -165,25 +165,52 @@ func (a *App) Start(ctx context.Context) error {
 	// heartbeat has had a chance to run.
 	a.recordContact()
 
+	// recoveredByPowerCycle records that the bring-up needed the plug. It skips
+	// the startup reboot further down: a mains cycle is the strictly harder
+	// restart, so following it with GW_REBOOT_REQ would only cost another 60–90 s
+	// for nothing.
+	recoveredByPowerCycle := false
+
 	if err := a.connectAndLoad(ctx); err != nil {
-		return err
-	}
+		// The gateway may already have been frozen before this process ever ran —
+		// a node reboot, a redeploy while it was wedged, or an unclean previous
+		// exit that left both session slots occupied. Recovering from that needs a
+		// power cycle, and none of the loops that would do it are running yet (they
+		// start at the end of this function). Without escalating here the bridge
+		// never comes up at all: it just fails, gets restarted, and fails again.
+		if !a.cfg.Restart.PowerCycleEnabled() {
+			return err
+		}
+		logger.Error("Initial KLF200 bring-up failed - escalating to a power cycle", "error", err)
+		if pcErr := a.doPowerCycle(ctx); pcErr != nil {
+			logger.Error("Startup power cycle failed", "error", pcErr)
+			// Report the original failure; the power cycle is the remedy, not the
+			// problem, so its error is context rather than the headline.
+			return fmt.Errorf("initial bring-up failed and power cycle did not help: %w", err)
+		}
+		// doPowerCycle ends with connectAndLoad + Register + heartbeat, so the
+		// bring-up is complete at this point.
+		logger.Info("KLF200 bring-up recovered by power cycle")
+		recoveredByPowerCycle = true
+	} else {
+		// Register covers: discovery + subscriptions + initial publish.
+		if err := a.cm.Register(ctx); err != nil {
+			return err
+		}
 
-	// Register covers: discovery + subscriptions + initial publish.
-	if err := a.cm.Register(ctx); err != nil {
-		return err
+		// Heartbeat: keepalive + liveness. Its confirmations stamp lastContact.
+		a.startHeartbeatFn()
 	}
-
-	// Heartbeat: keepalive + liveness. Its confirmations stamp lastContact.
-	a.startHeartbeatFn()
 
 	// Startup reboot: clear any zombie session slots left by a prior unclean
 	// shutdown. KLF200 has only 2 API slots and does not garbage-collect
 	// abandoned ones, so a fresh startup can otherwise inherit a wedged state
 	// that only a device reboot can recover from.
-	logger.Info("Rebooting KLF200 on startup to clear any zombie session slots")
-	if err := a.doReboot(ctx); err != nil {
-		return fmt.Errorf("startup reboot: %w", err)
+	if !recoveredByPowerCycle {
+		logger.Info("Rebooting KLF200 on startup to clear any zombie session slots")
+		if err := a.doReboot(ctx); err != nil {
+			return fmt.Errorf("startup reboot: %w", err)
+		}
 	}
 
 	// Background loops.
@@ -202,6 +229,17 @@ func (a *App) Start(ctx context.Context) error {
 // client so inbound notifications mutate nodes; the per-node device-updated
 // callbacks are wired by the bridge covers during Register.
 func (a *App) connectAndLoad(ctx context.Context) error {
+	// Bound the whole attempt. The gateway's freeze mode accepts TCP and then
+	// leaves the TLS handshake hanging, and Conn.Connect only respects whatever
+	// deadline it is given — with a plain cancel-only context that is forever, so
+	// the process would block here indefinitely instead of failing and letting a
+	// caller (or Kubernetes) do something about it.
+	if secs := a.cfg.Velux.ConnectTimeoutSeconds; secs > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(secs)*time.Second)
+		defer cancel()
+	}
+
 	logger.Info("Connecting to KLF200", "host", a.cfg.Velux.Host)
 	if err := a.klf.Connect(ctx); err != nil {
 		return err

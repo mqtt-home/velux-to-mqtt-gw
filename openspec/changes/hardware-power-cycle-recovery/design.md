@@ -50,6 +50,13 @@ Guard rails: a failed scheduled cycle falls back to the soft reboot (maintenance
 
 Not a risk for moving covers: io-homecontrol actuators run a movement themselves once commanded, so cutting gateway power mid-travel loses feedback, not the movement.
 
+### D7: The escalation must also cover startup, and the bring-up needs a deadline
+Field failure on 2026-07-31, found while deploying D6: a bridge started against an already-frozen gateway and **hung in the TLS handshake for minutes with zero restarts**. Two independent defects combined.
+
+First, `Conn.Connect` bounds the dial by its context, but the startup context from `main` is cancel-only — no deadline. The freeze accepts TCP and never completes the handshake, so the process blocked forever: no error, no exit, no supervisor restart, and no recovery path reached. Fixed with `velux.connect-timeout-seconds` (default 45) applied inside `connectAndLoad`, so every caller — startup, reconnect, reboot, power cycle — is bounded per attempt.
+
+Second, the escalation as designed lived only in `checkHealth` and (D6) the periodic loop, both of which start *after* a successful bring-up. A gateway frozen before the process started could therefore never be recovered by the bridge itself. `Start` now escalates once to `doPowerCycle` when the initial bring-up fails and a plug is configured, and skips the startup soft reboot afterwards (a mains cycle is the strictly harder restart).
+
 ## Risks / Trade-offs
 
 - **Wrong topic/payload does nothing** → Mitigation: log the exact publish (topic + payload) at info; document per-plug examples (Tasmota/Shelly) in the README; feature is opt-in so misconfig cannot affect default users.

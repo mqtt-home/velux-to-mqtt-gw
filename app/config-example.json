@@ -10,7 +10,8 @@
   },
   "velux": {
     "host": "192.168.1.50",
-    "password": "velux123"
+    "password": "velux123",
+    "connect-timeout-seconds": 45
   },
   "homeassistant": {
     "prefix": "",
