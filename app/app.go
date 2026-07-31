@@ -218,6 +218,17 @@ func (a *App) startHeartbeat() {
 	a.heartbeat = klf200.NewHeartbeat(a.client)
 	a.heartbeat.Start()
 
+	// Capture the channel once. The goroutine below must NOT read a.heartbeat on
+	// every loop iteration: stopHeartbeat() sets that field to nil on every
+	// reconnect (and the startup KLF200 reboot does exactly that), so a surviving
+	// goroutine would dereference nil. That is a real crash, not a theoretical
+	// race — it took the bridge down with
+	//   panic: invalid memory address or nil pointer dereference
+	//   main.(*App).startHeartbeat.func1() app.go:228
+	// on the reboot-on-startup path. Reading the field from two goroutines while
+	// one writes it is also a data race in its own right.
+	failureCh := a.heartbeat.FailureCh
+
 	a.loopsWG.Add(1)
 	go func() {
 		defer a.loopsWG.Done()
@@ -225,7 +236,7 @@ func (a *App) startHeartbeat() {
 			select {
 			case <-a.stopCh:
 				return
-			case err, ok := <-a.heartbeat.FailureCh:
+			case err, ok := <-failureCh:
 				if !ok {
 					return
 				}
