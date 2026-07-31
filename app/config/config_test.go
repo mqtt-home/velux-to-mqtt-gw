@@ -463,3 +463,27 @@ func TestPowerCycleEnabled(t *testing.T) {
 		})
 	}
 }
+
+// TestPeriodicPowerCycleEnabled: the hard periodic restart needs both the flag
+// and a plug topic — the flag alone cannot be honoured.
+func TestPeriodicPowerCycleEnabled(t *testing.T) {
+	tests := []struct {
+		name  string
+		flag  bool
+		topic string
+		want  bool
+	}{
+		{"neither", false, "", false},
+		{"flag only", true, "", false},
+		{"topic only", false, "plug/set", false},
+		{"both", true, "plug/set", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := RestartConfig{PeriodicPowerCycle: tt.flag, PowerCycleTopic: tt.topic}
+			if got := r.PeriodicPowerCycleEnabled(); got != tt.want {
+				t.Errorf("PeriodicPowerCycleEnabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

@@ -74,6 +74,27 @@ type RestartConfig struct {
 	// gateway's capacitors to drain, or the freeze can survive the cycle.
 	// Default 10.
 	PowerCycleOffSeconds int `json:"power-cycle-off-seconds"`
+	// PeriodicPowerCycle makes the RestartInterval loop cut mains instead of
+	// sending GW_REBOOT_REQ. Off by default; requires PowerCycleTopic.
+	//
+	// Use it when the soft reboot demonstrably does not clear the freeze on your
+	// gateway — the tell is that the device re-accepts TCP a second or two after
+	// GW_REBOOT_REQ, far too fast to have actually restarted, while the covers
+	// stay unresponsive. Cutting mains prophylactically then prevents the wedge
+	// rather than recovering from it.
+	//
+	// Safe with respect to moving covers: io-homecontrol actuators execute a
+	// movement themselves once commanded, so de-powering the *gateway* mid-travel
+	// loses position feedback, not the movement.
+	PeriodicPowerCycle bool `json:"periodic-power-cycle"`
+}
+
+// PeriodicPowerCycleEnabled reports whether the periodic restart should cut mains
+// instead of sending a soft reboot. It requires a configured plug: asking for a
+// hard periodic restart without a topic cannot be honoured, and silently doing
+// nothing would be worse than falling back to the soft reboot.
+func (r RestartConfig) PeriodicPowerCycleEnabled() bool {
+	return r.PeriodicPowerCycle && r.PowerCycleEnabled()
 }
 
 // PowerCycleEnabled reports whether the external power-cycle escalation is

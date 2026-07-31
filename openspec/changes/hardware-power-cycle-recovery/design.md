@@ -43,6 +43,13 @@ Track the last power-cycle time; enforce a minimum gap (reuse/derive from `resta
 ### D5: Reuse existing bring-up and availability transitions
 `doPowerCycle` ends by calling the same `connectAndLoad` + `cm.Register` + `startHeartbeatFn` used by `doReboot`, and the `wedged` CAS + `MarkAllAvailable` recovery is driven by the next healthy `checkHealth` tick, so HA entities do not flap beyond the existing offline→online transition.
 
+### D6: Optional prophylactic hard restart on the periodic interval
+`restart.periodic-power-cycle` (bool, default false, requires `power-cycle-topic`) makes the existing `restart-interval` loop cut mains instead of sending `GW_REBOOT_REQ`. Rationale from the field: on this gateway the soft reboot demonstrably does not restart the device — it re-accepted TCP ~2 s after `GW_REBOOT_REQ` — so a purely escalation-based design still leaves the covers dead for up to `health-check-interval × 2` on every freeze cycle. Restarting for real on a schedule prevents the wedge instead of recovering from it.
+
+Guard rails: a failed scheduled cycle falls back to the soft reboot (maintenance should not be skipped entirely), and a scheduled cycle inside the `powerCycleMinGap` window of a wedge-triggered one is skipped, not repeated. A set flag with no topic logs one warning at startup and uses the soft reboot, rather than silently doing nothing for months.
+
+Not a risk for moving covers: io-homecontrol actuators run a movement themselves once commanded, so cutting gateway power mid-travel loses feedback, not the movement.
+
 ## Risks / Trade-offs
 
 - **Wrong topic/payload does nothing** → Mitigation: log the exact publish (topic + payload) at info; document per-plug examples (Tasmota/Shelly) in the README; feature is opt-in so misconfig cannot affect default users.
@@ -55,7 +62,7 @@ Track the last power-cycle time; enforce a minimum gap (reuse/derive from `resta
 ## Open Questions
 
 - Should the power cycle also be offered as an explicit operator-triggered MQTT command (manual "recover now"), in addition to automatic escalation? (Deferred; out of scope for this change.)
-- Should a configurable option allow the periodic loop to use a power cycle instead of a soft reboot on some cadence (e.g. weekly)? (Deferred; escalation-only for now per Non-Goals.)
+- ~~Should a configurable option allow the periodic loop to use a power cycle instead of a soft reboot on some cadence (e.g. weekly)?~~ **Resolved 2026-07-31: yes, as `restart.periodic-power-cycle` (D6).**
 - Exact debounce floor value — tie to `restart-interval` or a fixed 15 min? (Resolve in tasks; default to a fixed floor.)
 
 ## References

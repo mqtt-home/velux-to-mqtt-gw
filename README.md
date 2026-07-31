@@ -55,7 +55,8 @@ See [`app/config-example.json`](app/config-example.json) for a ready-to-copy tem
     "power-cycle-topic": "",
     "power-cycle-off-payload": "OFF",
     "power-cycle-on-payload": "ON",
-    "power-cycle-off-seconds": 10
+    "power-cycle-off-seconds": 10,
+    "periodic-power-cycle": false
   },
   "loglevel": "info"
 }
@@ -100,6 +101,7 @@ See [`app/config-example.json`](app/config-example.json) for a ready-to-copy tem
 | `power-cycle-off-payload` | string | `"OFF"` | Payload published to cut power |
 | `power-cycle-on-payload` | string | `"ON"` | Payload published to restore power |
 | `power-cycle-off-seconds` | integer | `10` | Dwell with power removed, long enough for the gateway's capacitors to drain |
+| `periodic-power-cycle` | bool | `false` | Make the `restart-interval` loop **cut mains** instead of sending `GW_REBOOT_REQ`. Requires `power-cycle-topic`; without it the soft reboot is used and a warning is logged once |
 
 > **Automatic power-cycle recovery (optional).** The KLF200's most common failure
 > mode is a network-subsystem freeze after roughly a day of an open connection:
@@ -135,6 +137,23 @@ See [`app/config-example.json`](app/config-example.json) for a ready-to-copy tem
 >
 > Do not point this at the plug's **state** topic — it must be the command topic,
 > or the bridge will publish into a topic the plug only reads back.
+
+> **Prophylactic hard restart (`periodic-power-cycle`).** On some gateways the
+> soft reboot does not clear the freeze at all — the tell is that the device
+> re-accepts TCP a second or two after `GW_REBOOT_REQ`, far too fast to have
+> actually restarted, while the covers stay unresponsive. There, waiting for the
+> wedge and then recovering means the covers are dead for up to
+> `health-check-interval × 2` every time. Setting `periodic-power-cycle: true`
+> turns the existing `restart-interval` maintenance into a mains cycle, so the
+> gateway is restarted for real before it ever wedges.
+>
+> Behaviour details: a scheduled cycle that fails falls back to the soft reboot
+> (better than skipping maintenance), and one that lands within 15 minutes of a
+> wedge-triggered cycle is skipped rather than repeated. Both are logged.
+>
+> This is safe for covers in motion: io-homecontrol actuators execute a movement
+> themselves once commanded, so de-powering the *gateway* mid-travel costs
+> position feedback, not the movement.
 
 > **Startup and reboot timing.** The bridge always reboots the KLF200 once
 > during startup to clear any zombie session slots left by a previous unclean
@@ -344,7 +363,8 @@ verbose = false
     "power-cycle-topic": "",
     "power-cycle-off-payload": "OFF",
     "power-cycle-on-payload": "ON",
-    "power-cycle-off-seconds": 10
+    "power-cycle-off-seconds": 10,
+    "periodic-power-cycle": false
   },
   "loglevel": "info"
 }

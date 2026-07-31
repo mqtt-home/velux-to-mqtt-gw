@@ -692,3 +692,129 @@ func TestPowerCycleRestoresPowerOnCancel(t *testing.T) {
 		t.Fatalf("publishes = %v, want the last one to restore power (ON)", got)
 	}
 }
+
+// ─── periodic hard restart ───────────────────────────────────────────────────
+
+// TestPeriodicRestartUsesPowerCycleWhenConfigured is the point of the option: on
+// gateways where GW_REBOOT_REQ provably does not clear the freeze, the scheduled
+// maintenance must cut mains instead of asking politely.
+func TestPeriodicRestartUsesPowerCycleWhenConfigured(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Restart.RestartInterval = 24
+	cfg.Restart.PeriodicPowerCycle = true
+
+	a, klf, _, hbStarts := newTestApp(cfg)
+	withFastReboot(t, 1)
+	pubs := withPlug(a, "hs100/velux_reset/set")
+	a.now = func() time.Time { return time.Unix(3_000_000, 0) }
+
+	a.runPeriodicRestart(context.Background())
+
+	got := pubs()
+	if len(got) != 2 || got[0].payload != "OFF" || got[1].payload != "ON" {
+		t.Fatalf("publishes = %v, want OFF then ON", got)
+	}
+	if klf.rebooted != 0 {
+		t.Errorf("GW_REBOOT_REQ sent %d times, want 0 (hard restart requested)", klf.rebooted)
+	}
+	if *hbStarts == 0 {
+		t.Errorf("heartbeat not restarted after the periodic power cycle")
+	}
+}
+
+// TestPeriodicRestartSoftByDefault pins the default: without the opt-in the loop
+// keeps sending the soft reboot and never touches the plug.
+func TestPeriodicRestartSoftByDefault(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Restart.RestartInterval = 24
+
+	a, klf, _, _ := newTestApp(cfg)
+	withFastReboot(t, 1)
+	pubs := withPlug(a, "hs100/velux_reset/set") // plug available but not requested
+	a.now = func() time.Time { return time.Unix(3_100_000, 0) }
+
+	a.runPeriodicRestart(context.Background())
+
+	if klf.rebooted != 1 {
+		t.Errorf("GW_REBOOT_REQ sent %d times, want 1", klf.rebooted)
+	}
+	if got := pubs(); len(got) != 0 {
+		t.Errorf("published %v without periodic-power-cycle, want nothing", got)
+	}
+}
+
+// TestPeriodicPowerCycleWithoutTopicFallsBack covers the misconfiguration: asking
+// for a hard restart with no plug configured must still perform the soft reboot,
+// not silently skip maintenance.
+func TestPeriodicPowerCycleWithoutTopicFallsBack(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Restart.RestartInterval = 24
+	cfg.Restart.PeriodicPowerCycle = true // but no PowerCycleTopic
+
+	a, klf, _, _ := newTestApp(cfg)
+	withFastReboot(t, 1)
+	a.now = func() time.Time { return time.Unix(3_200_000, 0) }
+
+	a.runPeriodicRestart(context.Background())
+
+	if klf.rebooted != 1 {
+		t.Errorf("GW_REBOOT_REQ sent %d times, want 1 (fallback)", klf.rebooted)
+	}
+}
+
+// TestPeriodicPowerCycleFallsBackToSoftReboot: if the cycle itself fails (e.g.
+// the gateway never comes back within the backoff budget), still try the soft
+// reboot rather than leaving the tick with nothing done.
+func TestPeriodicPowerCycleFallsBackToSoftReboot(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Restart.RestartInterval = 24
+	cfg.Restart.PeriodicPowerCycle = true
+
+	a, klf, _, _ := newTestApp(cfg)
+	withFastReboot(t, 1)
+	withPlug(a, "plug/set")
+	a.now = func() time.Time { return time.Unix(3_300_000, 0) }
+
+	// Gateway never answers again -> doPowerCycle exhausts its attempts.
+	klf.connectErr = errors.New("dead gateway")
+
+	a.runPeriodicRestart(context.Background())
+
+	if klf.rebooted == 0 {
+		t.Errorf("soft reboot fallback was not attempted after a failed power cycle")
+	}
+}
+
+// TestPeriodicPowerCycleSkippedWhenDebounced: a hard restart minutes ago means
+// the scheduled one adds nothing, and a soft reboot is not a useful substitute
+// on a gateway where it does not work anyway.
+func TestPeriodicPowerCycleSkippedWhenDebounced(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Restart.RestartInterval = 24
+	cfg.Restart.PeriodicPowerCycle = true
+
+	a, klf, _, _ := newTestApp(cfg)
+	withFastReboot(t, 1)
+	pubs := withPlug(a, "plug/set")
+	base := time.Unix(3_400_000, 0)
+	a.now = func() time.Time { return base }
+
+	// A wedge escalation just power-cycled the gateway.
+	if err := a.doPowerCycle(context.Background()); err != nil {
+		t.Fatalf("priming power cycle: %v", err)
+	}
+	afterPriming := len(pubs())
+	rebootsBefore := klf.rebooted
+
+	// Periodic tick lands one minute later.
+	a.now = func() time.Time { return base.Add(time.Minute) }
+	a.runPeriodicRestart(context.Background())
+
+	if got := len(pubs()); got != afterPriming {
+		t.Errorf("publishes = %d, want unchanged %d (debounced)", got, afterPriming)
+	}
+	if klf.rebooted != rebootsBefore {
+		t.Errorf("soft reboot ran %d times after a debounced hard restart, want none",
+			klf.rebooted-rebootsBefore)
+	}
+}

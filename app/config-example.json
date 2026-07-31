@@ -23,7 +23,8 @@
     "power-cycle-topic": "",
     "power-cycle-off-payload": "OFF",
     "power-cycle-on-payload": "ON",
-    "power-cycle-off-seconds": 10
+    "power-cycle-off-seconds": 10,
+    "periodic-power-cycle": false
   },
   "loglevel": "info"
 }

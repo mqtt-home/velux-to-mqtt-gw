@@ -310,7 +310,19 @@ func (a *App) startRebootLoop() {
 		logger.Info("Periodic reboot disabled")
 		return
 	}
-	logger.Info("Periodic reboot enabled", "interval", interval)
+	hard := a.cfg.Restart.PeriodicPowerCycle
+	switch {
+	case hard && a.cfg.Restart.PeriodicPowerCycleEnabled():
+		logger.Info("Periodic restart enabled (hard: mains power cycle)",
+			"interval", interval, "topic", a.cfg.Restart.PowerCycleTopic)
+	case hard:
+		// Asked for hard, but no plug to do it with. Say so loudly once instead of
+		// quietly doing something else for the next months.
+		logger.Warn("periodic-power-cycle is set but power-cycle-topic is empty - falling back to the soft reboot",
+			"interval", interval)
+	default:
+		logger.Info("Periodic reboot enabled (soft: GW_REBOOT_REQ)", "interval", interval)
+	}
 
 	a.loopsWG.Add(1)
 	go func() {
@@ -322,13 +334,45 @@ func (a *App) startRebootLoop() {
 			case <-a.stopCh:
 				return
 			case <-ticker.C:
-				logger.Info("Periodic reboot triggered")
-				if err := a.doReboot(context.Background()); err != nil {
-					logger.Error("Periodic reboot failed", "error", err)
-				}
+				a.runPeriodicRestart(context.Background())
 			}
 		}
 	}()
+}
+
+// runPeriodicRestart performs one tick of the periodic restart: a mains power
+// cycle when configured, otherwise the soft GW_REBOOT_REQ.
+//
+// The hard variant exists because on some gateways the soft reboot provably does
+// not clear the network-subsystem freeze (the device re-accepts TCP ~2s after
+// GW_REBOOT_REQ — far too fast for a real restart — while covers stay dead).
+// Cutting mains on a schedule prevents that wedge instead of recovering from it.
+//
+// If the power cycle cannot run, fall back to the soft reboot rather than
+// skipping the maintenance entirely — except when it was debounced, which means a
+// hard restart already happened minutes ago and a soft one adds nothing.
+func (a *App) runPeriodicRestart(ctx context.Context) {
+	if a.cfg.Restart.PeriodicPowerCycleEnabled() {
+		logger.Info("Periodic restart triggered (power cycle)")
+		err := a.doPowerCycle(ctx)
+		if err == nil {
+			return
+		}
+		if errors.Is(err, errPowerCycleDebounced) {
+			logger.Info("Periodic power cycle skipped - one happened recently", "error", err)
+			return
+		}
+		logger.Error("Periodic power cycle failed - falling back to soft reboot", "error", err)
+		if err := a.doReboot(ctx); err != nil {
+			logger.Error("Periodic soft-reboot fallback failed", "error", err)
+		}
+		return
+	}
+
+	logger.Info("Periodic reboot triggered")
+	if err := a.doReboot(ctx); err != nil {
+		logger.Error("Periodic reboot failed", "error", err)
+	}
 }
 
 // recordContact stamps the current time as the last successful KLF200 contact.
