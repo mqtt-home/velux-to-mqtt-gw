@@ -379,6 +379,98 @@ func TestWedgeMarksOfflineAndRetries(t *testing.T) {
 	}
 }
 
+// blockingManager is a coverManager whose MarkAllUnavailable blocks until
+// released. It stands in for the real failure mode of 2026-08-29: that call
+// publishes over MQTT, and mqtt-gateway's publish blocks indefinitely while the
+// broker is unreachable.
+type blockingManager struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (m *blockingManager) Register(_ context.Context) error { return nil }
+func (m *blockingManager) MarkAllAvailable()                {}
+func (m *blockingManager) CloseAll()                        {}
+
+func (m *blockingManager) MarkAllUnavailable() {
+	close(m.entered)
+	<-m.release
+}
+
+// TestHealthCheckStallIsReported asserts the watchdog around a health-check
+// pass. Before it existed, a pass that blocked took every later tick with it in
+// total silence — the ticker just kept firing into a busy loop body — so the
+// outage looked like "one ERROR line and then nothing" in the logs, with no
+// indication that recovery had stopped running at all.
+func TestHealthCheckStallIsReported(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Restart.HealthCheckInterval = 10 // seconds
+
+	a, _, _, _ := newTestApp(cfg)
+	mgr := &blockingManager{entered: make(chan struct{}), release: make(chan struct{})}
+	a.cm = mgr
+
+	// Backdate contact so the pass trips the wedge branch and reaches the
+	// manager call that blocks. RestartOnError stays false, so once released the
+	// pass returns without touching the KLF200 seams.
+	base := time.Unix(1_000_000, 0)
+	a.now = func() time.Time { return base }
+	a.lastContact.Store(base.Add(-60 * time.Second).UnixNano())
+
+	stalls := make(chan time.Duration, 8)
+	a.onHealthCheckStall = func(d time.Duration) { stalls <- d }
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.runHealthCheckTick(context.Background(), 10*time.Millisecond)
+	}()
+
+	<-mgr.entered
+
+	// The watchdog must keep reporting for as long as the pass is stuck, not
+	// warn once and fall silent.
+	for i := 0; i < 2; i++ {
+		select {
+		case <-stalls:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("watchdog report %d did not arrive for a stalled pass", i+1)
+		}
+	}
+
+	// And the tick must complete normally once the pass finishes.
+	close(mgr.release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("health-check tick did not return after the pass completed")
+	}
+}
+
+// TestHealthCheckTickReportsNothingWhenPromptRuns guards against a watchdog
+// that cries wolf on every ordinary tick.
+func TestHealthCheckTickReportsNothingWhenPromptRuns(t *testing.T) {
+	cfg := config.Config{}
+	cfg.Restart.HealthCheckInterval = 10
+
+	a, _, mgr, _ := newTestApp(cfg)
+	base := time.Unix(1_000_000, 0)
+	a.now = func() time.Time { return base }
+	a.lastContact.Store(base.UnixNano()) // fresh contact => healthy pass
+
+	reports := 0
+	a.onHealthCheckStall = func(time.Duration) { reports++ }
+
+	a.runHealthCheckTick(context.Background(), time.Second)
+
+	if reports != 0 {
+		t.Fatalf("watchdog reported %d times on a healthy pass, want 0", reports)
+	}
+	if _, unavail, _, _ := mgr.counts(); unavail != 0 {
+		t.Fatalf("MarkAllUnavailable called %d times on a healthy pass, want 0", unavail)
+	}
+}
+
 // TestWedgeRecoveryTriggersReboot asserts that on wedge recovery the health
 // check first reconnects (doReconnect) and then immediately reboots the
 // gateway (doReboot) to clear any zombie session slot, restoring availability

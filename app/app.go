@@ -101,6 +101,10 @@ type App struct {
 	// now is the clock seam so health checks can be unit-tested without real time.
 	now func() time.Time
 
+	// onHealthCheckStall is the watchdog-report seam (see reportHealthCheckStall).
+	// nil in production, where the default log line is what an operator needs.
+	onHealthCheckStall func(time.Duration)
+
 	// lastPowerCycle is the UnixNano of the last power cycle, for the debounce
 	// floor (powerCycleMinGap). Guarded by resetMu, like the cycle itself.
 	lastPowerCycle int64
@@ -333,10 +337,62 @@ func (a *App) startHealthCheck() {
 			case <-a.stopCh:
 				return
 			case <-ticker.C:
-				a.checkHealth(context.Background())
+				a.runHealthCheckTick(context.Background(), interval)
 			}
 		}
 	}()
+}
+
+// runHealthCheckTick runs one checkHealth pass under a stall watchdog.
+//
+// The pass still runs to completion before the next tick is served: two
+// concurrent recovery ladders would fight over the KLF200 connection, and
+// serializing them is the whole point of resetMu. What this adds is visibility.
+// A tick that blocks silently swallows every later tick with it, which is
+// exactly how the 2026-08-29 outage stayed invisible: one ERROR line, then
+// half an hour of nothing while the recovery goroutine sat in an MQTT publish.
+// A ticker gives no signal for that — the drops are invisible by construction.
+//
+// So: warn once per warnAfter for as long as the pass runs. Recovery legitimately
+// takes minutes (a power cycle plus its reconnect backoff is ~5), so the first
+// line is not necessarily a fault; a repeating one is.
+func (a *App) runHealthCheckTick(ctx context.Context, warnAfter time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.checkHealth(ctx)
+	}()
+
+	if warnAfter <= 0 {
+		<-done
+		return
+	}
+
+	start := a.now()
+	timer := time.NewTimer(warnAfter)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-done:
+			return
+		case <-timer.C:
+			a.reportHealthCheckStall(a.now().Sub(start))
+			timer.Reset(warnAfter)
+		}
+	}
+}
+
+// reportHealthCheckStall surfaces a health-check pass that has outlived its
+// interval. Routed through the seam so tests can observe the watchdog without
+// capturing logs; nil means the default operator-visible line.
+func (a *App) reportHealthCheckStall(runningFor time.Duration) {
+	if a.onHealthCheckStall != nil {
+		a.onHealthCheckStall(runningFor)
+		return
+	}
+	logger.Error("Health check pass is still running - KLF200 recovery is stalled",
+		"running_for", runningFor.Round(time.Second))
 }
 
 // startRebootLoop launches the periodic device-reboot loop. Disabled when the
