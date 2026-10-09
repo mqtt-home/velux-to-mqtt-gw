@@ -309,3 +309,98 @@ Flash-Code.
 - [SiLabs — EFM32 Series 0 Debug Bootloaders / AAP-Lock](https://jp.silabs.com/documents/public/training/mcu/efm32-series-0-debug-bootloaders.pdf)
 - [ST Community — STM32F4 RDP Level 2 (irreversibel, JTAG-Disable)](https://community.st.com/t5/stm32-mcus-products/stm32f407-protection-level-2/td-p/571995)
 - [Velux firmware update host](https://updates2.velux.com/)
+
+---
+
+## Anhang A — OpenOCD read-only Gate-Test (Schritt 1 & 2)
+
+**Zweck:** Nur *feststellen*, ob die MCUs debug-/lesesperrbar sind — **ohne
+jeden Schreibzugriff**. Entscheidet, ob die Entschlüsselungsfrage über einen
+Flash-Dump überhaupt angreifbar ist. Alles hier ist **lesend**; die
+gefährlichen Schreib-/Erase-Sequenzen sind am Ende explizit als „nicht tippen"
+aufgeführt.
+
+### Voraussetzungen
+
+- SWD-Debug-Probe: ST-Link v2/v3, J-Link oder CMSIS-DAP.
+- OpenOCD ≥ 0.11 (Befehle `dap apid` / `dap info` sind versionsabhängig —
+  Output prüfen, nicht blind vertrauen).
+- Verkabelung: **SWCLK, SWDIO, GND**, und **VREF/VTref an 3V3 des Geräts**
+  (nur Referenz-Spannung mitlesen, die MCU nicht fremdspeisen). SWD-Pads/
+  Pinout am KLF200-PCB: **Beleg fehlt** — vor dem Anschluss per Durchgangs-
+  messung gegen die MCU-Pins (EFM32 SWCLK/SWDIO, STM32 PA14/PA13) verifizieren.
+- Kein SRST nötig; **nicht** unter Reset halten, nicht resetten.
+
+### Erwartete Diskriminator-Werte (belegt, SiLabs/ARM)
+
+| MCU | offen | gesperrt |
+|---|---|---|
+| EFM32GG990 | AHB-AP IDR **`0x24770011`** | AAP IDR **`0x16E60001`** |
+| STM32F427 | SWD verbindet, Option-Bytes lesbar, RDP 0/1 | RDP2 → SWD verbindet **gar nicht** |
+
+### Schritt 1 — EFM32GG990 Debug-Lock (AP-IDR lesen)
+
+```bash
+# Nur AP#0-IDR lesen, keine Flash-/Target-Operation.
+openocd \
+  -f interface/stlink.cfg \
+  -c "transport select swd" \
+  -c "adapter speed 100" \
+  -c "swj_newdap efm32 cpu -expected-id 0x2ba01477" \
+  -c "dap create efm32.dap -chain-position efm32.cpu" \
+  -c "init" \
+  -c "echo [format {EFM32 AP0 IDR = 0x%08x} [efm32.dap apid 0]]" \
+  -c "shutdown"
+```
+
+**Interpretation:**
+- `0x24770011` → **offen**: der AHB-AP antwortet, Flash via SWD dumpbar
+  (→ Schritt 3 / Bootloader reversen → Chiffre + evtl. Schlüssel).
+- `0x16E60001` → **gesperrt**: nur der AAP antwortet. Der einzige Ausweg wäre
+  ein AAP-Mass-Erase — **das zerstört den Flash und beendet jede statische
+  Analyse**; nicht ausführen.
+- Verbindet gar nichts → Verkabelung/Pinout prüfen (nicht automatisch „locked").
+
+Alternative, falls `apid` in der OpenOCD-Version fehlt: `-c "dap info 0"`
+nach `init` — gibt die AP-Liste inkl. IDR aus.
+
+### Schritt 2 — STM32F427 RDP-Level (Option-Bytes lesen)
+
+```bash
+# stm32f2x-Treiber deckt STM32F4 ab. options_read ist rein lesend.
+openocd \
+  -f interface/stlink.cfg \
+  -f target/stm32f4x.cfg \
+  -c "init" \
+  -c "stm32f2x options_read 0" \
+  -c "shutdown"
+```
+
+**Interpretation:**
+- Gibt `RDP`/`user`-Optionen aus → **RDP 0** (voll lesbar) oder **RDP 1**
+  (Debug ok, Flash-Lesen via Debug gesperrt, **kein** Dump ohne RDP-Downgrade).
+- `init`/Examine schlägt fehl, keine SWD-Verbindung trotz korrekter
+  Verkabelung → **RDP 2** (Debug dauerhaft aus; das ist die Antwort).
+- Rein lesend und ungefährlich. **Nicht** `options_write` / RDP-Downgrade
+  ausführen: ein RDP1→RDP0-Wechsel löst einen **Mass-Erase** aus.
+
+### NICHT tippen (destruktiv / Vertrauensgrenze verletzend)
+
+Diese Befehle sind kein Teil des Gate-Tests und würden den Flash löschen oder
+über reines Lesen hinausgehen:
+
+- EFM32 AAP Mass-Erase: Schreiben auf AAP `CMDKEY`/`CMD` (`DEVICEERASE`) —
+  irreversibler Flash+SRAM-Löscher.
+- `flash erase_sector` / `flash erase_address` / `stm32f2x mass_erase`.
+- STM32 `stm32f2x options_write …` mit geändertem RDP (RDP1→RDP0 = Mass-Erase;
+  RDP→Level 2 = irreversibel).
+- Jeder `mww`/`write_memory` auf Option-Byte- oder AAP-Registeradressen.
+
+### Einordnung (Aktivitätsklassen, vgl. §9)
+
+Schritt 1 + 2 sind **Auslesen eigener Gerätezustände** (Debug-Register/Option-
+Bytes) — reines Lesen, kein Bypass einer Prüfung. Erst ein tatsächlicher
+Flash-Dump (nur bei offenem Debug-Port) wäre „Auslesen eigener Firmwaredaten";
+dessen Analyse bleibt Reverse Engineering. Das Umgehen einer gesetzten Sperre
+(Mass-Erase, Glitching, RDP-Downgrade) ist eine **andere, destruktive
+Kategorie** und hier bewusst ausgeschlossen.
