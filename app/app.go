@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -96,6 +98,18 @@ type App struct {
 	// wedged tracks whether the gateway is currently considered unreachable, so
 	// the health check only logs the transition once and restores on recovery.
 	wedged atomic.Bool
+
+	// freezeEventCounter yields a stable per-process id per freeze event so all
+	// probe log lines for one freeze (initial + follow-ups + post-soft-reboot)
+	// share the same `event_id=` key for grep-based correlation. See openspec
+	// change klf200-tcp-exhaustion-probe.
+	freezeEventCounter atomic.Uint64
+
+	// currentFreezeEventID holds the event_id of the wedge currently in
+	// progress, valid from the wedge-entry transition until recovery. The
+	// checkHealth ticker runs single-threaded, so no synchronization is needed.
+	// Empty when not wedged.
+	currentFreezeEventID string
 
 	// resetMu serializes the reboot/reconnect paths (startup reboot, periodic
 	// reboot loop, and the health-check wedge-recovery reconnect+reboot) so
@@ -331,15 +345,32 @@ func (a *App) checkHealth(ctx context.Context) {
 		if a.wedged.CompareAndSwap(true, false) {
 			logger.Info("KLF200 contact restored", "since_contact", sinceContact)
 			a.cm.MarkAllAvailable()
+			a.currentFreezeEventID = ""
 		}
 		return
 	}
 
-	// Wedged: no contact within the threshold.
+	// Wedged: no contact within the threshold. The wedge-entry branch is taken
+	// exactly once per wedge (until recovery clears wedged), so the
+	// freeze-diagnostic probe fires exactly once per event and its event_id
+	// stays stable across the follow-ups and the post-soft-reboot probe.
 	if a.wedged.CompareAndSwap(false, true) {
 		logger.Error("KLF200 unreachable - manual power-cycle required",
 			"since_contact", sinceContact, "threshold", threshold)
 		a.cm.MarkAllUnavailable()
+
+		// Freeze-diagnostic probe: classify the TCP-layer state of the KLF200
+		// API port at the moment the wedge is first detected. Log-only; never
+		// influences the recovery path. Follow-ups at t+120s and t+300s
+		// (async) test whether the W5500 recycles its slots on its own. See
+		// openspec change klf200-tcp-exhaustion-probe.
+		a.currentFreezeEventID = a.nextFreezeEventID()
+		probeStart := time.Now()
+		initialOutcome, initialElapsed, initialErr := freezeProbe(ctx, a.probeAddr())
+		a.logProbe(a.currentFreezeEventID, probeStageInitial, initialOutcome, initialElapsed, initialErr)
+		if initialOutcome == probeOutcomeTimeout {
+			a.scheduleFollowUpProbes(ctx, a.currentFreezeEventID, probeStart)
+		}
 	} else {
 		logger.Warn("KLF200 still unreachable - waiting for manual power-cycle",
 			"since_contact", sinceContact)
@@ -366,10 +397,83 @@ func (a *App) checkHealth(ctx context.Context) {
 		return
 	}
 
+	// Post-soft-reboot probe: did GW_REBOOT_REQ actually clear the TCP-layer
+	// blockade? `accepted` → the freeze was an EFM32-side deadlock that the
+	// reboot cleared. `timeout` → deeper W5500/EFM32 state that only a mains
+	// power-cycle can resolve. Log-only; correlated to the wedge via the
+	// event_id captured at wedge-entry.
+	if a.currentFreezeEventID != "" {
+		postOutcome, postElapsed, postErr := freezeProbe(ctx, a.probeAddr())
+		a.logProbe(a.currentFreezeEventID, probeStagePostSoftReboot, postOutcome, postElapsed, postErr)
+	}
+
 	if a.wedged.CompareAndSwap(true, false) {
 		logger.Info("KLF200 recovered after wedge")
 		a.cm.MarkAllAvailable()
+		a.currentFreezeEventID = ""
 	}
+}
+
+// probeAddr returns the host:port the freeze probe dials. Uses the configured
+// KLF200 host and the fixed KLF200 API port (klf200.DefaultPort).
+func (a *App) probeAddr() string {
+	return net.JoinHostPort(a.cfg.Velux.Host, strconv.Itoa(klf200.DefaultPort))
+}
+
+// nextFreezeEventID yields a stable, monotonically increasing id per freeze
+// event so all probe log lines for one freeze share the same `event_id=` key.
+func (a *App) nextFreezeEventID() string {
+	return "f" + strconv.FormatUint(a.freezeEventCounter.Add(1), 10)
+}
+
+// logProbe emits one structured log line per probe result. Key set is stable
+// so `grep event_id=<id>` retrieves every data point for a single freeze
+// without a metrics pipeline. When outcome == probeOutcomeError, the raw dial
+// error text is added as `probe_err=` so diagnostic detail is not lost to
+// classification.
+func (a *App) logProbe(eventID, stage, outcome string, elapsed time.Duration, dialErr error) {
+	args := []any{
+		"KLF200 freeze probe",
+		"event_id", eventID,
+		"stage", stage,
+		"freeze_probe", outcome,
+		"t_ms", elapsed.Milliseconds(),
+	}
+	if dialErr != nil {
+		args = append(args, "probe_err", dialErr.Error())
+	}
+	logger.Info(args...)
+}
+
+// scheduleFollowUpProbes runs the two follow-up probes at t+120s and t+300s on
+// a background goroutine so the wedge-recovery path is not delayed. Cancels
+// early if the App is stopping.
+func (a *App) scheduleFollowUpProbes(ctx context.Context, eventID string, initialStart time.Time) {
+	a.loopsWG.Add(1)
+	go func() {
+		defer a.loopsWG.Done()
+		addr := a.probeAddr()
+		for _, step := range []struct {
+			after time.Duration
+			stage string
+		}{
+			{followUpAt120s, probeStageFollowUp120s},
+			{followUpAt300s, probeStageFollowUp300s},
+		} {
+			wait := time.Until(initialStart.Add(step.after))
+			if wait > 0 {
+				select {
+				case <-time.After(wait):
+				case <-a.stopCh:
+					return
+				case <-ctx.Done():
+					return
+				}
+			}
+			outcome, elapsed, dialErr := freezeProbe(ctx, addr)
+			a.logProbe(eventID, step.stage, outcome, elapsed, dialErr)
+		}
+	}()
 }
 
 // doReconnect performs an in-process reconnect without rebooting the gateway:

@@ -12,11 +12,26 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"os"
 	"sync"
+	"time"
 
 	"github.com/mqtt-home/velux-to-mqtt-gw/klf200/protocol"
 )
+
+// tcpKeepAlivePeriod is how long an idle TCP connection waits before sending
+// the first keepalive probe. Kept short so the peer (a WIZnet W5500 with a
+// hardware-fixed pool of 8 concurrent TCP sockets) discovers a dead client
+// and frees its slot well inside its TIME_WAIT window. See openspec change
+// klf200-tcp-exhaustion-probe design D1.
+const tcpKeepAlivePeriod = 30 * time.Second
+
+// gracefulCloseDrainBudget bounds how long a graceful close waits for the
+// peer's FIN after our own FIN. See openspec change klf200-tcp-exhaustion-probe
+// design D2.
+const gracefulCloseDrainBudget = 2 * time.Second
 
 // DefaultPort is the TCP port the KLF200 API listens on. Ported from
 // config.Config.DEFAULT_PORT.
@@ -158,6 +173,10 @@ func (c *Conn) Connect(ctx context.Context) error {
 		return fmt.Errorf("klf200: connect to %s: %w", addr, err)
 	}
 	tlsConn := nc.(*tls.Conn)
+	if err := configureTCPKeepAlive(tlsConn); err != nil {
+		_ = tlsConn.Close()
+		return fmt.Errorf("klf200: enable TCP keepalive on %s: %w", addr, err)
+	}
 
 	c.mu.Lock()
 	c.tlsConn = tlsConn
@@ -245,10 +264,14 @@ func (c *Conn) Write(frame protocol.Frame) error {
 	return nil
 }
 
-// Disconnect performs an orderly TLS/TCP close (TLS close_notify then TCP FIN).
-// This is critical: it releases the KLF200 API session slot so a later
-// reconnect can succeed. It is idempotent. Ported from Connection.disconnect,
-// but performs a graceful close rather than an abrupt one.
+// Disconnect performs an orderly TLS/TCP close: TLS close_notify + TCP FIN,
+// then a bounded read-drain to consume the peer's FIN so the socket transitions
+// through FIN_WAIT to CLOSED instead of being torn down by our subsequent hard
+// Close while the peer's FIN is still in flight. This is critical: it releases
+// the KLF200 API session slot so a later reconnect can succeed, and — under the
+// W5500-socket-exhaustion hypothesis (openspec change klf200-tcp-exhaustion-probe)
+// — it minimizes the risk of leaving the peer's socket parked in CLOSE_WAIT.
+// It is idempotent.
 func (c *Conn) Disconnect() error {
 	c.mu.Lock()
 	conn := c.tlsConn
@@ -260,20 +283,79 @@ func (c *Conn) Disconnect() error {
 	if conn == nil {
 		return nil
 	}
-	// CloseWrite sends the TLS close_notify alert followed by a TCP FIN,
-	// giving the gateway an orderly shutdown so it releases the session slot.
-	var firstErr error
-	if err := conn.CloseWrite(); err != nil {
-		firstErr = err
-	}
-	if err := conn.Close(); err != nil && firstErr == nil {
-		firstErr = err
-	}
+	firstErr := gracefulClose(conn, gracefulCloseDrainBudget)
 	life.signalLost()
 	if firstErr != nil {
 		return fmt.Errorf("klf200: disconnect: %w", firstErr)
 	}
 	return nil
+}
+
+// configureTCPKeepAlive enables SO_KEEPALIVE with tcpKeepAlivePeriod on the
+// TCP socket underlying tlsConn. Returns an error if the connection cannot be
+// unwrapped to a *net.TCPConn or the syscall rejects the setting.
+func configureTCPKeepAlive(tlsConn *tls.Conn) error {
+	nc := tlsConn.NetConn()
+	tc, ok := nc.(*net.TCPConn)
+	if !ok {
+		return fmt.Errorf("klf200: expected *net.TCPConn under *tls.Conn, got %T", nc)
+	}
+	if err := tc.SetKeepAlive(true); err != nil {
+		return fmt.Errorf("SetKeepAlive: %w", err)
+	}
+	if err := tc.SetKeepAlivePeriod(tcpKeepAlivePeriod); err != nil {
+		return fmt.Errorf("SetKeepAlivePeriod: %w", err)
+	}
+	return nil
+}
+
+// halfCloser abstracts the small subset of net.Conn we need for a bounded
+// graceful close: a way to send our FIN independently of Close (CloseWrite),
+// and the usual SetReadDeadline/Read/Close. Both *tls.Conn and *net.TCPConn
+// satisfy it; tests can pass a raw *net.TCPConn to exercise gracefulClose
+// without a real TLS handshake.
+type halfCloser interface {
+	net.Conn
+	CloseWrite() error
+}
+
+// gracefulClose half-closes conn (CloseWrite: TLS close_notify + TCP FIN for a
+// *tls.Conn, or just TCP FIN for a *net.TCPConn), then read-drains for up to
+// budget to consume the peer's FIN or any close_notify reply, then fully
+// closes. It returns the first error observed; a drain timeout is not an error
+// (it is the expected case when the peer is unresponsive).
+//
+// Safe on both the shutdown path (peer alive) and the wedge-recovery path
+// (peer presumed dead): the bounded drain caps the extra latency at budget on
+// the dead-peer case.
+func gracefulClose(conn halfCloser, budget time.Duration) error {
+	var firstErr error
+	if err := conn.CloseWrite(); err != nil {
+		firstErr = err
+	}
+	// Bound the drain via SetReadDeadline. If setting the deadline fails, the
+	// drain would otherwise block indefinitely — skip it and surface the
+	// deadline error, since an unbounded drain is exactly the misbehavior this
+	// helper exists to prevent.
+	if err := conn.SetReadDeadline(time.Now().Add(budget)); err != nil {
+		if firstErr == nil {
+			firstErr = fmt.Errorf("set drain deadline: %w", err)
+		}
+	} else {
+		// A deadline-driven Read returns io.EOF (folded to nil by io.Copy) on
+		// peer FIN, or a deadline-exceeded error we deliberately ignore. Any
+		// other Read error (e.g. use-of-closed-network-connection from a
+		// concurrent teardown) is a real failure worth surfacing.
+		if _, err := io.Copy(io.Discard, conn); err != nil &&
+			!errors.Is(err, os.ErrDeadlineExceeded) &&
+			firstErr == nil {
+			firstErr = fmt.Errorf("drain: %w", err)
+		}
+	}
+	if err := conn.Close(); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
 }
 
 // readLoop is the single reader goroutine. It reads bytes, feeds the SLIP
