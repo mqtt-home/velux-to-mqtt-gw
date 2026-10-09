@@ -3,15 +3,37 @@
 ## TL;DR
 
 Static disassembly of the network/TLS subsystem is **blocked** on the
-2.0.0.71 image. The MCU firmware is not directly loadable — the first
-~1.1 MB of the payload is high-entropy (encrypted or opaquely compressed)
-and matches the EFM32GG990's 1 MB flash size, and no valid ARM Cortex-M
-vector table exists anywhere else in the file. No compiler, TLS-stack,
-RTOS, or network-stack strings are present in any plaintext region.
+2.0.0.71 image: the ~1.1 MB EFM32 image is **encrypted**, so it is not
+directly loadable. The hardware power-cycle mitigation already implemented
+in this repo remains the appropriate response.
 
-This is the dead-end path anticipated by the design's "encryption gate
-first, fail loud" decision (D2). The hardware power-cycle mitigation
-already implemented in this repo remains the appropriate response.
+**Update (follow-up analysis — see [`HEADER-ANALYSIS.md`](HEADER-ANALYSIS.md)
+and [`TRUST-CHAIN.md`](TRUST-CHAIN.md)):** the container and its protection
+model are now fully reversed, which refines the dead-end from "high-entropy,
+cause unknown" to a precise statement:
+
+- The file is a container `[header 0x1A9][segment table][payload][CRC-32]`.
+  The payload-length field (`0x3E21FC` @ `0x11D`) and a trailing **CRC-32 (BE)
+  `0xCADE2565`** over `[0..EOF-4]` are verified to the byte.
+- Region 0 (`0x1A9..0x117000`, the EFM32 network/TLS image) is **encrypted in
+  ECB mode with a 128-bit block** (AES-sized; AES very likely but not proven):
+  uniform ~8.0 entropy across independent 128 KB blocks, and a clear
+  phase-0 block-collision peak (1941 repeated 16-B blocks). Region 1 is
+  **compressed** (proprietary framing); the web UI is plaintext.
+- **No cryptographic signature exists at the container level** — the only
+  whole-file check is a CRC-32 (integrity, not authenticity). Whether the
+  on-device bootloader verifies a signature *after* decryption is not decidable
+  from the file (**Beleg fehlt**).
+
+Reproduce the refined findings:
+```bash
+python3 container_probe.py samples/<sample>.bin
+python3 header_probe.py    samples/<sample>.bin
+```
+
+This remains the dead-end path anticipated by the design's "encryption gate
+first, fail loud" decision (D2): static disassembly needs the key, which lives
+in device flash, not in the file.
 
 ## Analysed sample
 
@@ -30,11 +52,13 @@ python3 triage.py <path-to-sample>.bin --out out
 ## Container
 
 At file offset `0x0002` the image carries the ASCII banner
-`"VELUX FIRMWARE"` followed by the product tag `"KLF200 TLS"`. The
-banner region (roughly the first `0x2000` bytes) contains a small
-metadata table then transitions into a high-entropy payload. No header
-format has been reversed; the payload appears to be a bundle of MCU
-images + web-UI assets.
+`"VELUX FIRMWARE"` followed by the product tag `"KLF200 TLS"`. The real
+header is **0x1A9 (425) bytes** — not ~8 KB; the "~8 KB" figure in older
+triage output was a scan-limit heuristic. The header holds a segment table
+and a payload-length field, then transitions into the payload at `0x1A9`.
+The payload is a bundle of an encrypted MCU image (region 0) + a compressed
+section (region 1) + plaintext web-UI assets. Full header reversal is in
+[`HEADER-ANALYSIS.md`](HEADER-ANALYSIS.md).
 
 ## Region map
 

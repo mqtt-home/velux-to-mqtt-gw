@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Container-layout probe for the KLF200 VELUX FIRMWARE bundle.
+"""Payload-classification probe for the KLF200 VELUX FIRMWARE bundle.
 
-Complements triage.py. Where triage.py classifies regions by entropy, this
-script reverse-engineers the container *header* and answers, with evidence:
+Companion to HEADER-ANALYSIS.md / header_probe.py (which dissect the 425-byte
+container frame: magic, segment table, payload-length field @0x11D, trailing
+CRC-32). This script focuses on the question those left open — is the payload
+ENCRYPTED or merely COMPRESSED — and answers it with evidence:
 
-  - where the real header ends and the payload begins
-  - the payload-length field and the trailing CRC-32
-  - whether region 0 is ENCRYPTED (uniform ~8.0 entropy per independent
-    block) vs merely COMPRESSED (skewed histogram, decompressor accepts it)
-  - whether any cryptographic signature is present (it is not; integrity is
-    a plain CRC-32)
+  - re-confirms the frame (payload length field, CRC-32 trailer) for self-check
+  - proves region 0 is ENCRYPTED: uniform ~8.0 entropy across INDEPENDENT
+    128 KB blocks + flat histogram + no decompressor accepts the stream
+  - shows region 1 is COMPRESSED (skewed histogram, low entropy), framing
+    proprietary (no stdlib decompressor accepts it)
+
+Payload start and CRC coverage follow HEADER-ANALYSIS.md: header = 0x1A9 bytes,
+payload = [0x1A9 .. EOF-4], CRC-32(BE) over [0 .. EOF-4] in the last 4 bytes.
 
 Deterministic: same input bytes -> same output. Stdlib only.
 
@@ -35,20 +39,16 @@ def main(path: str) -> None:
     print(f"file:   {path}")
     print(f"size:   {n} (0x{n:x})")
 
-    # --- header / payload boundary ---
-    # banner占 is zero-padded up to 0x110; a descriptor table follows; the
-    # payload begins where sustained high entropy starts.
-    start = next((o for o in range(0x100, 0x800, 4) if ent(d[o:o + 256]) > 6.5), 0x1ad)
-    # refine to the first non-structured byte run
-    while start > 0x110 and d[start - 1] not in (0x00,):
-        start -= 1
-    hdr_end = 0x1ad  # empirically the payload start for v2.0.0.71
+    # --- header / payload boundary (per HEADER-ANALYSIS.md) ---
+    HDR = 0x1A9          # container header length (bytes), payload starts here
+    hdr_end = HDR
     print(f"\n[header] banner magic @0x2 = {d[2:16]!r}, tag @0x10 = {d[0x10:0x1a]!r}")
 
-    # payload length field @0x11c (BE)
-    f11c = struct.unpack(">I", d[0x11c:0x120])[0]
-    print(f"[header] field@0x11c = 0x{f11c:x} ({f11c}); EOF-0x1ad = {n - 0x1ad}"
-          f"  -> {'MATCH (payload length)' if f11c == n - 0x1ad else 'no match'}")
+    # payload-length field @0x11D (3-byte BE); payload excludes header and CRC
+    f11d = struct.unpack(">I", b"\x00" + d[0x11d:0x120])[0]
+    expect = n - HDR - 4
+    print(f"[header] field@0x11D = 0x{f11d:x} ({f11d}); EOF-header-CRC = {expect}"
+          f"  -> {'MATCH (payload length)' if f11d == expect else 'no match'}")
 
     # trailing CRC-32 (BE) over bytes 0..EOF-4
     trailer = struct.unpack(">I", d[-4:])[0]
@@ -78,6 +78,26 @@ def main(path: str) -> None:
         off += BLOCK
     print(f"  -> {enc_blocks} fully-encrypted 128KB blocks; histogram flat; "
           f"no decompressor accepts the stream => ENCRYPTED (not compressed).")
+
+    # --- cipher mode: ECB detection via 16-byte block collisions ---
+    # Random data yields ~0 aligned 16B collisions (71k^2 / 2^129). A clear
+    # peak at one phase => ECB with a 128-bit block (AES-sized). Chaining/
+    # counter modes destroy such repeats.
+    ct = d[hdr_end:0x117000]
+    print(f"\n[cipher] ECB probe on region0 ({len(ct)} bytes):")
+    best_ph, best_inst = 0, -1
+    for ph in range(16):
+        c = Counter(ct[i:i + 16] for i in range(ph, len(ct) - 16, 16))
+        inst = sum(v - 1 for v in c.values() if v > 1)
+        if inst > best_inst:
+            best_ph, best_inst = ph, inst
+        if ph == 0:
+            ph0 = inst
+    print(f"  phase0 duplicate 16B instances = {ph0}; max phase={best_ph}")
+    verdict = ("ECB (128-bit block, AES-sized) — identical plaintext blocks map "
+               "to identical ciphertext" if best_ph == 0 and ph0 > 100
+               else "no clear ECB signature (chained/counter/stream mode)")
+    print(f"  -> {verdict}")
 
     # --- region 1: compressed, unknown framing ---
     r1 = d[0x117000:0x1a1000]

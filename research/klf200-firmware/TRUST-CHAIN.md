@@ -23,37 +23,51 @@ Hardware weiter untersuchen lässt.
 
 ---
 
-## 1a. Container-Layout — VERIFIZIERT (`container_probe.py`)
+## 1a. Container & Payload — VERIFIZIERT
 
-Reproduzierbar gegen das Sample. Der reale Header ist **429 Byte (`0x1ad`)**,
-nicht 8 KB (die alte Triage-Schätzung war eine Entropie-Heuristik):
+Reproduzierbar gegen das Sample (`364c3b73…e49d`). Zwei Skripte, zwei Fragen:
 
-| Offset | Inhalt | Beleg |
-|---|---|---|
-| `0x00` | `00 01` Format-/Versionsmarker | hexdump |
-| `0x02` | `"VELUX FIRMWARE"` | hexdump |
-| `0x10` | `"KLF200 TLS"`, danach null-gepaddet bis `0x110` | hexdump |
-| `0x110` | **Segment-Manifest** (Records enden je auf `0x20000`=128 KB, 1-Byte-IDs `0x46,0x45,0x44,0x43,0x3e,0x3d,…`) | probe |
-| `0x11c` | Payload-Längenfeld **`0x3e21fc` = exakt `EOF − 0x1ad`** | Feld == Länge ✓ |
-| `0x1ad` | **Payload beginnt** | Entropie-Grenze |
-| letzte 4 B | **CRC-32 (BE) über `0x0..EOF-4` = `0xcade2565`** | exakte Übereinstimmung ✓ |
+- **Container-Rahmen** → [`HEADER-ANALYSIS.md`](HEADER-ANALYSIS.md) /
+  `header_probe.py`: realer Header **425 B (`0x1A9`)** (nicht 8 KB — alte
+  Triage-Heuristik), Form `[Header][Segment-Tabelle][Payload][CRC32]`,
+  Payload-Längenfeld `0x3E21FC` @`0x11D` (= Datei − Header − CRC, auf das Byte),
+  Trailer **CRC-32 (BE) `0xCADE2565`** über `[0..EOF-4]`. **Kein**
+  Signaturblock auf Container-Ebene.
+- **Payload-Klassifikation** → `container_probe.py` (die von HEADER-ANALYSIS
+  offengelassene Frage „verschlüsselt oder nur gepackt?"):
 
 **Die drei Kernfragen — jetzt mit Beweis:**
 
-1. **Region 0 (`0x1ad..0x117000`, ~1,1 MB) ist VERSCHLÜSSELT, nicht
+1. **Region 0 (`0x1A9..0x117000`, ~1,1 MB) ist VERSCHLÜSSELT, nicht
    komprimiert.** Entropie **7,994–7,999 über jeden der 8 unabhängigen
    128-KB-Blöcke** (9. Block 7,52 = Übergang), flaches Histogramm (~0,43 %/
    Byte), kein Dekompressor akzeptiert den Stream. Gleichmäßige ~8,0 über
-   unabhängige Blöcke ⇒ Block-/Stream-Chiffre. Größe ≈ EFM32GG990-Flash (1 MB).
-   → **H1 bestätigt.**
+   *unabhängige* Blöcke ⇒ Block-/Stream-Chiffre. Größe ≈ EFM32GG990-Flash
+   (1 MB). → **H1 bestätigt.**
+   - **Modus: ECB, 128-Bit-Block (belegt).** Phasentest: bei Phase 0
+     (aligned zu `0x1A9`) **1941 wiederholte 16-B-Blöcke** gegenüber ~997 bei
+     allen anderen Phasen; ein Block `22408ce7…` 379× (ECB eines konstanten
+     Plaintext-Laufs, z. B. leerer Flash). Verkettete/Counter-Modi würden
+     solche Wiederholungen zerstören. In 71k Zufallsblöcken wären ~0 Kollisionen
+     zu erwarten (≈10⁻²⁹). → kein IV/kein Chaining.
+   - **Algorithmus: sehr wahrscheinlich AES (nicht bewiesen).** Begründung:
+     EFM32GG990 hat einen HW-AES-Block (128/256), SiLabs-Referenz AN0060 nutzt
+     AES. ECB belegt nur Modus+Blockgröße (128 bit), nicht den Algorithmus.
+   - **Sicherheitsfolge:** ECB + *eine* Datei für alle Geräte ⇒ mit hoher
+     Wahrscheinlichkeit **ein globaler Schlüssel ohne IV**. Dann entschlüsselt
+     der Key aus *einem* Gerät *alle* Updates → macht den „Key im Flash"-Pfad
+     zum hochwertigen Ziel.
+   - **Brute-Force ausgeschlossen:** 2¹²⁸-Schlüsselraum ist physikalisch
+     unknackbar. Der Weg zum Klartext führt über den **Schlüssel** (im
+     Bootloader-Flash) oder den **Decryptor** (Bootloader reversen), nicht über
+     Raten.
 2. **Region 1 (`0x117000..0x1a1000`) ist KOMPRIMIERT, nicht verschlüsselt** —
    Entropie 3,97, Histogramm von `0x98` (12,4 %) dominiert, Framing
    proprietär/unbekannt (kein stdlib-Dekompressor greift).
 3. **KEINE kryptografische Signatur im Container.** Einziges Integritäts-
    artefakt ist eine **CRC-32** (von jedem neu berechenbar → keine
-   Authentizität). Kein RSA/ECDSA-großer Hochentropie-Block im 429-B-Header
-   (voll durch Banner+Manifest belegt) und keiner am Dateiende (letzte 4 KB
-   Entropie 5,17). → **H2 für den Container beantwortet: nein.**
+   Authentizität); Details & Negativ-Belege in `HEADER-ANALYSIS.md`.
+   → **H2 für den Container beantwortet: nein.**
 
 **Konsequenz für die Vertrauenskette:** Die Schutzwirkung des *Update-Pakets*
 ruht allein auf **Vertraulichkeit (Verschlüsselung Region 0) + CRC-Integrität**
@@ -62,8 +76,9 @@ die **Entschlüsselung (Schlüssel nötig)**.
 
 > **Vorbehalt (Beleg fehlt):** Dies betrifft nur das *Containerformat*. Ob der
 > **Bootloader im Gerät** beim Flashen zusätzlich signiert/verifiziert, ist aus
-> der Datei allein nicht entscheidbar — der Bootloader könnte entschlüsseln und
-> separat prüfen. Container-seitig ist das einzige Auth-Artefakt eine CRC.
+> der Datei allein nicht entscheidbar — eine Signatur könnte *innerhalb* der
+> entschlüsselten MCU-Payload liegen. Container-seitig ist das einzige
+> Auth-Artefakt eine CRC.
 
 Reproduktion: `python3 container_probe.py samples/…v2.0.0.71.bin`
 
@@ -254,19 +269,26 @@ Flash-Code.
 > Flash-Versuch. Gelockt → das *ist* die Antwort: statisch blockiert,
 > konsistent mit dem bestehenden `FINDINGS.md`-Dead-End.
 
-**Nächste 5 Schritte (Gewinn/Risiko-optimiert):**
+**Nächste Schritte (Gewinn/Risiko-optimiert):**
 
-1. **Header zerlegen (Risiko 0):** erste ~8 KB strukturell parsen — Offset-/
-   Längen-Tabelle, CRC-Felder, möglicher Signaturblock. Beantwortet
-   „signiert?" ohne Hardware. *(triage.py erweiterbar, sobald Sample wieder
-   lokal.)*
-2. **Dekompression testen (Risiko 0):** zlib/LZMA/LZ4/SiLabs-EBL gegen
-   Region 0 & 1 → trennt „komprimiert" von „verschlüsselt".
-3. **EFM32 Debug-Lock-Test (Risiko ~0):** SWD-Probe, **nur IDR lesen**
-   (`0x24770011` offen / `0x16E60001` gelockt). Kein Schreiben.
-4. **STM32 RDP-Level lesen (Risiko ~0, nicht senken):** Option-Byte-Status.
-5. **Externes NOR passiv auslesen (Risiko niedrig):** Clip-On-Read, Inhalt mit
-   triage.py klassifizieren.
+- ✅ **Header zerlegt** (§1a): Layout + Payload-Länge + CRC-32 verifiziert,
+  keine Container-Signatur. `container_probe.py`.
+- ✅ **Dekompression getestet** (§1a): Region 0 verschlüsselt, Region 1
+  komprimiert (proprietär).
+1. **EFM32 Debug-Lock-Test (Risiko ~0):** SWD-Probe, **nur IDR lesen**
+   (`0x24770011` offen / `0x16E60001` gelockt). Kein Schreiben. Entscheidet, ob
+   der Flash (und damit ein etwaiger Entschlüsselungs-Schlüssel im
+   Bootloader-Code) überhaupt lesbar ist.
+2. **STM32 RDP-Level lesen (Risiko ~0, nicht senken):** Option-Byte-Status.
+3. **Externes NOR passiv auslesen (Risiko niedrig):** Clip-On-Read, Inhalt mit
+   `triage.py`/`container_probe.py` klassifizieren.
+4. **Optional, rein analytisch:** Region 1 gegen embedded-typische Kompressoren
+   (heatshrink, LZO, LZSS-Varianten) testen; das `0x98`-dominierte Histogramm
+   als Fingerabdruck nutzen. Risiko 0, Gewinn: Zugriff auf die Klartext-
+   Sektion ohne Hardware.
+5. **Chiffre-Identifikation (nur falls Schritt 1/3 einen Flash-Dump liefern):**
+   im Bootloader-Code nach AES-Tabellen/Schlüsselplan suchen. Das ist
+   *Reverse Engineering des eigenen Dumps*, kein Bypass.
 
 **Aktivitätsklassen (sauber getrennt):**
 - *Reines RE:* §1–§4, Schritte 1–2 — Analyse eigener/öffentlicher Daten.
